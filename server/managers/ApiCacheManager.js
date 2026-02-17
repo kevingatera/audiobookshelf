@@ -5,7 +5,7 @@ const Database = require('../Database')
 class ApiCacheManager {
   defaultCacheOptions = { max: 1000, maxSize: 10 * 1000 * 1000, sizeCalculation: (item) => item.body.length + JSON.stringify(item.headers).length }
   defaultTtlOptions = { ttl: 30 * 60 * 1000 }
-  highChurnModels = new Set(['session', 'mediaProgress', 'playbackSession'])
+  highChurnModels = new Set(['session', 'mediaProgress', 'playbackSession', 'device'])
 
   constructor(cache = new LRUCache(this.defaultCacheOptions), ttlOptions = this.defaultTtlOptions) {
     this.cache = cache
