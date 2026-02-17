@@ -6,6 +6,8 @@ class ApiCacheManager {
   defaultCacheOptions = { max: 1000, maxSize: 10 * 1000 * 1000, sizeCalculation: (item) => item.body.length + JSON.stringify(item.headers).length }
   defaultTtlOptions = { ttl: 30 * 60 * 1000 }
   highChurnModels = new Set(['session', 'mediaProgress', 'playbackSession', 'device'])
+  modelsInvalidatingPersonalized = new Set(['mediaProgress'])
+  modelsInvalidatingMe = new Set(['session', 'mediaProgress', 'playbackSession', 'device'])
 
   constructor(cache = new LRUCache(this.defaultCacheOptions), ttlOptions = this.defaultTtlOptions) {
     this.cache = cache
@@ -40,8 +42,8 @@ class ApiCacheManager {
   }
 
   clearUserProgressSlices(modelName, hook) {
-    const removedPersonalized = this.clearByUrlPattern(/^\/libraries\/[^/]+\/personalized/)
-    const removedMe = this.clearByUrlPattern(/^\/me(\/|\?|$)/)
+    const removedPersonalized = this.modelsInvalidatingPersonalized.has(modelName) ? this.clearByUrlPattern(/^\/libraries\/[^/]+\/personalized/) : 0
+    const removedMe = this.modelsInvalidatingMe.has(modelName) ? this.clearByUrlPattern(/^\/me(\/|\?|$)/) : 0
     Logger.debug(
       `[ApiCacheManager] ${modelName}.${hook}: cleared user-progress cache slices (personalized=${removedPersonalized}, me=${removedMe})`
     )

@@ -1122,7 +1122,7 @@ module.exports = {
 
       libraryItem.media = book
       itemMatches.push({
-        libraryItem: libraryItem.toOldJSONExpanded()
+        libraryItem: libraryItem.toOldJSONMinified()
       })
     }
 
