@@ -930,7 +930,7 @@ module.exports = {
       replacements: userPermissionBookWhere.replacements,
       include: baseDiscoverInclude,
       distinct: true,
-      col: 'book.id',
+      col: 'id',
       subQuery: false
     })
 
