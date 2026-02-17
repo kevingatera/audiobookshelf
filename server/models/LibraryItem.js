@@ -391,6 +391,7 @@ class LibraryItem extends Model {
       ])
 
       const continueSeriesPayload = continueSeriesResult.payload
+      // "Continue Series" shelf
       if (continueSeriesPayload.libraryItems.length) {
         shelves.push({
           id: 'continue-series',
@@ -404,6 +405,7 @@ class LibraryItem extends Model {
       Logger.debug(`Loaded ${continueSeriesPayload.libraryItems.length} of ${continueSeriesPayload.count} items for "Continue Series" in ${continueSeriesResult.elapsedSeconds}s`)
 
       const mostRecentPayload = mostRecentResult.payload
+      // "Recently Added" shelf
       if (mostRecentPayload.libraryItems.length) {
         shelves.push({
           id: 'recently-added',
@@ -417,6 +419,7 @@ class LibraryItem extends Model {
       Logger.debug(`Loaded ${mostRecentPayload.libraryItems.length} of ${mostRecentPayload.count} items for "Recently Added" in ${mostRecentResult.elapsedSeconds}s`)
 
       const seriesMostRecentPayload = seriesMostRecentResult.payload
+      // "Recent Series" shelf
       if (seriesMostRecentPayload.series.length) {
         shelves.push({
           id: 'recent-series',
@@ -430,6 +433,7 @@ class LibraryItem extends Model {
       Logger.debug(`Loaded ${seriesMostRecentPayload.series.length} of ${seriesMostRecentPayload.count} series for "Recent Series" in ${seriesMostRecentResult.elapsedSeconds}s`)
 
       const discoverLibraryItemsPayload = discoverResult.payload
+      // "Discover" shelf
       if (discoverLibraryItemsPayload.libraryItems.length) {
         shelves.push({
           id: 'discover',
@@ -443,6 +447,7 @@ class LibraryItem extends Model {
       Logger.debug(`Loaded ${discoverLibraryItemsPayload.libraryItems.length} of ${discoverLibraryItemsPayload.count} items for "Discover" in ${discoverResult.elapsedSeconds}s`)
 
       const mediaFinishedPayload = mediaFinishedResult.payload
+      // "Listen Again" shelf
       if (mediaFinishedPayload.items.length) {
         const ebookOnlyItemsInProgress = mediaFinishedPayload.items.filter((li) => li.media.ebookFormat && !li.media.numTracks)
         const audioItemsInProgress = mediaFinishedPayload.items.filter((li) => li.media.numTracks || li.mediaType === 'podcast')
@@ -459,6 +464,7 @@ class LibraryItem extends Model {
         }
 
         if (ebookOnlyItemsInProgress.length) {
+          // "Read Again" shelf
           shelves.push({
             id: 'read-again',
             label: 'Read Again',
@@ -472,6 +478,7 @@ class LibraryItem extends Model {
       Logger.debug(`Loaded ${mediaFinishedPayload.items.length} of ${mediaFinishedPayload.count} items for "Listen/Read Again" in ${mediaFinishedResult.elapsedSeconds}s`)
 
       const newestAuthorsPayload = newestAuthorsResult.payload
+      // "Newest Authors" shelf
       if (newestAuthorsPayload.authors.length) {
         shelves.push({
           id: 'newest-authors',
@@ -491,6 +498,7 @@ class LibraryItem extends Model {
       ])
 
       const newestEpisodesPayload = newestEpisodesResult.payload
+      // "Newest Episodes" shelf
       if (newestEpisodesPayload.libraryItems.length) {
         shelves.push({
           id: 'newest-episodes',
@@ -504,6 +512,7 @@ class LibraryItem extends Model {
       Logger.debug(`Loaded ${newestEpisodesPayload.libraryItems.length} of ${newestEpisodesPayload.count} episodes for "Newest Episodes" in ${newestEpisodesResult.elapsedSeconds}s`)
 
       const mostRecentPayload = mostRecentResult.payload
+      // "Recently Added" shelf
       if (mostRecentPayload.libraryItems.length) {
         shelves.push({
           id: 'recently-added',
@@ -517,6 +526,7 @@ class LibraryItem extends Model {
       Logger.debug(`Loaded ${mostRecentPayload.libraryItems.length} of ${mostRecentPayload.count} items for "Recently Added" in ${mostRecentResult.elapsedSeconds}s`)
 
       const mediaFinishedPayload = mediaFinishedResult.payload
+      // "Listen Again" shelf
       if (mediaFinishedPayload.items.length) {
         const ebookOnlyItemsInProgress = mediaFinishedPayload.items.filter((li) => li.media.ebookFormat && !li.media.numTracks)
         const audioItemsInProgress = mediaFinishedPayload.items.filter((li) => li.media.numTracks || li.mediaType === 'podcast')
@@ -533,6 +543,7 @@ class LibraryItem extends Model {
         }
 
         if (ebookOnlyItemsInProgress.length) {
+          // "Read Again" shelf
           shelves.push({
             id: 'read-again',
             label: 'Read Again',
