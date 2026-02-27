@@ -34,6 +34,7 @@ Last updated: 2026-02-28
 - Mobile home cold experience improved most by reducing first personalized payload cost and rendering above-the-fold shelves first.
 - `include=rssfeed` can materially hurt cold personalized responses in some runs.
 - Hybrid model chosen: fast first paint first, then background RSS metadata hydration for visible shelves.
+- New safeguard added in server personalized flow: Discover shelf query now has a timeout fallback (default 5000ms via `PERSONALIZED_DISCOVER_TIMEOUT_MS`) so one heavy Discover query does not stall the entire home response.
 
 ## Open PR prep notes (for upstream later)
 
