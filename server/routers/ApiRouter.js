@@ -35,6 +35,7 @@ const MiscController = require('../controllers/MiscController')
 const ShareController = require('../controllers/ShareController')
 const StatsController = require('../controllers/StatsController')
 const ApiKeyController = require('../controllers/ApiKeyController')
+const BookRequestController = require('../extensions/bookRequests/BookRequestController')
 
 class ApiRouter {
   constructor(Server) {
@@ -284,6 +285,13 @@ class ApiRouter {
     this.router.get('/search/authors', SearchController.findAuthor.bind(this))
     this.router.get('/search/chapters', SearchController.findChapters.bind(this))
     this.router.get('/search/providers', SearchController.getAllProviders.bind(this))
+
+    //
+    // Book Request Routes
+    //
+    this.router.get('/libraries/:id/book-requests/capabilities', LibraryController.middleware.bind(this), BookRequestController.getCapabilities.bind(BookRequestController))
+    this.router.get('/libraries/:id/book-requests/search', LibraryController.middleware.bind(this), BookRequestController.search.bind(BookRequestController))
+    this.router.post('/libraries/:id/book-requests', LibraryController.middleware.bind(this), BookRequestController.submit.bind(BookRequestController))
 
     //
     // Cache Routes (Admin and up)
