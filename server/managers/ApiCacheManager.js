@@ -20,6 +20,11 @@ class ApiCacheManager {
   }
 
   getModelName(model) {
+    if (Array.isArray(model)) {
+      const candidate = model.find((entry) => !!entry && typeof entry === 'object')
+      if (candidate) return this.getModelName(candidate)
+      return 'unknown'
+    }
     if (typeof model?.name === 'string') return model.name
     if (typeof model?.model?.name === 'string') return model.model.name
     if (typeof model?.constructor?.name === 'string' && model.constructor.name !== 'Object') return model.constructor.name
