@@ -337,38 +337,12 @@ class LibraryItem extends Model {
    */
   static async getPersonalizedShelves(library, user, include, limit) {
     const fullStart = Date.now() // Used for testing load times
-    const discoverTimeoutMs = Number(process.env.PERSONALIZED_DISCOVER_TIMEOUT_MS || 5000)
 
     const shelves = []
 
     const timed = async (loader) => {
       const start = Date.now()
       const payload = await loader()
-      return {
-        payload,
-        elapsedSeconds: ((Date.now() - start) / 1000).toFixed(2)
-      }
-    }
-
-    const timedWithTimeout = async (loader, timeoutMs, fallbackPayload, label) => {
-      const start = Date.now()
-      let timeoutHandle = null
-      const timeoutPromise = new Promise((resolve) => {
-        timeoutHandle = setTimeout(() => {
-          Logger.warn(`[LibraryItem] ${label} timed out after ${timeoutMs}ms, using fallback payload`)
-          resolve(fallbackPayload)
-        }, timeoutMs)
-      })
-
-      const payload = await Promise.race([loader(), timeoutPromise]).catch((error) => {
-        Logger.error(`[LibraryItem] ${label} failed, using fallback payload`, error)
-        return fallbackPayload
-      })
-
-      if (timeoutHandle) {
-        clearTimeout(timeoutHandle)
-      }
-
       return {
         payload,
         elapsedSeconds: ((Date.now() - start) / 1000).toFixed(2)
@@ -411,7 +385,7 @@ class LibraryItem extends Model {
         timed(() => libraryFilters.getLibraryItemsContinueSeries(library, user, include, limit)),
         timed(() => libraryFilters.getLibraryItemsMostRecentlyAdded(library, user, include, limit)),
         timed(() => libraryFilters.getSeriesMostRecentlyAdded(library, user, include, 5)),
-        timedWithTimeout(() => libraryFilters.getLibraryItemsToDiscover(library, user, include, limit), discoverTimeoutMs, { libraryItems: [], count: 0 }, 'Discover shelf query'),
+        timed(() => libraryFilters.getLibraryItemsToDiscover(library, user, include, limit)),
         timed(() => libraryFilters.getMediaFinished(library, user, include, limit)),
         timed(() => libraryFilters.getNewestAuthors(library, user, limit))
       ])

@@ -8,6 +8,12 @@ const { profile } = require('../../utils/profiler')
 const naturalSort = createNewSortInstance({
   comparer: new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }).compare
 })
+const discoverShelfCache = new Map()
+
+function buildDiscoverCacheKey(libraryId, userId, include, limit) {
+  const includeKey = Array.isArray(include) ? include.slice().sort().join(',') : ''
+  return `${libraryId}:${userId}:${limit}:${includeKey}`
+}
 
 module.exports = {
   decode(text) {
@@ -373,8 +379,15 @@ module.exports = {
   async getLibraryItemsToDiscover(library, user, include, limit) {
     if (library.mediaType !== 'book') return { libraryItems: [], count: 0 }
 
+    const cacheTtlMs = Number(process.env.PERSONALIZED_DISCOVER_CACHE_MS || 600000)
+    const cacheKey = buildDiscoverCacheKey(library.id, user.id, include, limit)
+    const cachedEntry = discoverShelfCache.get(cacheKey)
+    if (cachedEntry && Date.now() - cachedEntry.savedAt < cacheTtlMs) {
+      return cachedEntry.payload
+    }
+
     const { libraryItems, count } = await libraryItemsBookFilters.getDiscoverLibraryItems(library.id, user, include, limit)
-    return {
+    const payload = {
       libraryItems: libraryItems.map((li) => {
         const oldLibraryItem = li.toOldJSONMinified()
         if (li.rssFeed) {
@@ -387,6 +400,18 @@ module.exports = {
       }),
       count
     }
+
+    discoverShelfCache.set(cacheKey, {
+      payload,
+      savedAt: Date.now()
+    })
+
+    if (discoverShelfCache.size > 300) {
+      const oldestKey = discoverShelfCache.keys().next().value
+      if (oldestKey) discoverShelfCache.delete(oldestKey)
+    }
+
+    return payload
   },
 
   /**
