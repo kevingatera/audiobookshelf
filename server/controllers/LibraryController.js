@@ -893,7 +893,12 @@ class LibraryController {
       .split(',')
       .map((v) => v.trim().toLowerCase())
       .filter((v) => !!v)
-    const shelves = await Database.libraryItemModel.getPersonalizedShelves(req.library, req.user, include, limitPerShelf)
+    const shelfIds = (req.query.shelves || '')
+      .split(',')
+      .map((v) => v.trim().toLowerCase())
+      .filter((v) => !!v)
+
+    const shelves = await Database.libraryItemModel.getPersonalizedShelves(req.library, req.user, include, limitPerShelf, { shelfIds })
     res.json(shelves)
   }
 

@@ -335,10 +335,13 @@ class LibraryItem extends Model {
    * @param {number} limit
    * @returns {object[]} array of shelf objects
    */
-  static async getPersonalizedShelves(library, user, include, limit) {
+  static async getPersonalizedShelves(library, user, include, limit, options = {}) {
     const fullStart = Date.now() // Used for testing load times
 
     const shelves = []
+    const requestedShelfIds = new Set((options.shelfIds || []).filter((shelfId) => !!shelfId))
+    const hasShelfFilter = requestedShelfIds.size > 0
+    const shouldIncludeShelf = (shelfId) => !hasShelfFilter || requestedShelfIds.has(shelfId)
 
     const timed = async (loader) => {
       const start = Date.now()
@@ -349,50 +352,61 @@ class LibraryItem extends Model {
       }
     }
 
-    // "Continue Listening" shelf
-    const itemsInProgressPayload = await libraryFilters.getMediaItemsInProgress(library, user, include, limit, false)
-    if (itemsInProgressPayload.items.length) {
-      const ebookOnlyItemsInProgress = itemsInProgressPayload.items.filter((li) => li.media.ebookFormat && !li.media.numTracks)
-      const audioItemsInProgress = itemsInProgressPayload.items.filter((li) => li.media.numTracks || li.mediaType === 'podcast')
+    const wantsContinueListening = shouldIncludeShelf('continue-listening')
+    const wantsContinueReading = shouldIncludeShelf('continue-reading')
+    if (wantsContinueListening || wantsContinueReading) {
+      // "Continue Listening" shelf
+      const itemsInProgressPayload = await libraryFilters.getMediaItemsInProgress(library, user, include, limit, false)
+      if (itemsInProgressPayload.items.length) {
+        const ebookOnlyItemsInProgress = itemsInProgressPayload.items.filter((li) => li.media.ebookFormat && !li.media.numTracks)
+        const audioItemsInProgress = itemsInProgressPayload.items.filter((li) => li.media.numTracks || li.mediaType === 'podcast')
 
-      if (audioItemsInProgress.length) {
-        shelves.push({
-          id: 'continue-listening',
-          label: 'Continue Listening',
-          labelStringKey: 'LabelContinueListening',
-          type: library.isPodcast ? 'episode' : 'book',
-          entities: audioItemsInProgress,
-          total: itemsInProgressPayload.count
-        })
-      }
+        if (wantsContinueListening && audioItemsInProgress.length) {
+          shelves.push({
+            id: 'continue-listening',
+            label: 'Continue Listening',
+            labelStringKey: 'LabelContinueListening',
+            type: library.isPodcast ? 'episode' : 'book',
+            entities: audioItemsInProgress,
+            total: itemsInProgressPayload.count
+          })
+        }
 
-      if (ebookOnlyItemsInProgress.length) {
-        // "Continue Reading" shelf
-        shelves.push({
-          id: 'continue-reading',
-          label: 'Continue Reading',
-          labelStringKey: 'LabelContinueReading',
-          type: 'book',
-          entities: ebookOnlyItemsInProgress,
-          total: itemsInProgressPayload.count
-        })
+        if (wantsContinueReading && ebookOnlyItemsInProgress.length) {
+          // "Continue Reading" shelf
+          shelves.push({
+            id: 'continue-reading',
+            label: 'Continue Reading',
+            labelStringKey: 'LabelContinueReading',
+            type: 'book',
+            entities: ebookOnlyItemsInProgress,
+            total: itemsInProgressPayload.count
+          })
+        }
       }
+      Logger.debug(`Loaded ${itemsInProgressPayload.items.length} of ${itemsInProgressPayload.count} items for "Continue Listening/Reading" in ${((Date.now() - fullStart) / 1000).toFixed(2)}s`)
     }
-    Logger.debug(`Loaded ${itemsInProgressPayload.items.length} of ${itemsInProgressPayload.count} items for "Continue Listening/Reading" in ${((Date.now() - fullStart) / 1000).toFixed(2)}s`)
 
     if (library.isBook) {
+      const wantsContinueSeries = shouldIncludeShelf('continue-series')
+      const wantsRecentlyAdded = shouldIncludeShelf('recently-added')
+      const wantsRecentSeries = shouldIncludeShelf('recent-series')
+      const wantsDiscover = shouldIncludeShelf('discover')
+      const wantsListenAgain = shouldIncludeShelf('listen-again') || shouldIncludeShelf('read-again')
+      const wantsNewestAuthors = shouldIncludeShelf('newest-authors')
+
       const [continueSeriesResult, mostRecentResult, seriesMostRecentResult, discoverResult, mediaFinishedResult, newestAuthorsResult] = await Promise.all([
-        timed(() => libraryFilters.getLibraryItemsContinueSeries(library, user, include, limit)),
-        timed(() => libraryFilters.getLibraryItemsMostRecentlyAdded(library, user, include, limit)),
-        timed(() => libraryFilters.getSeriesMostRecentlyAdded(library, user, include, 5)),
-        timed(() => libraryFilters.getLibraryItemsToDiscover(library, user, include, limit)),
-        timed(() => libraryFilters.getMediaFinished(library, user, include, limit)),
-        timed(() => libraryFilters.getNewestAuthors(library, user, limit))
+        wantsContinueSeries ? timed(() => libraryFilters.getLibraryItemsContinueSeries(library, user, include, limit)) : Promise.resolve({ payload: { libraryItems: [], count: 0 }, elapsedSeconds: '0.00' }),
+        wantsRecentlyAdded ? timed(() => libraryFilters.getLibraryItemsMostRecentlyAdded(library, user, include, limit)) : Promise.resolve({ payload: { libraryItems: [], count: 0 }, elapsedSeconds: '0.00' }),
+        wantsRecentSeries ? timed(() => libraryFilters.getSeriesMostRecentlyAdded(library, user, include, 5)) : Promise.resolve({ payload: { series: [], count: 0 }, elapsedSeconds: '0.00' }),
+        wantsDiscover ? timed(() => libraryFilters.getLibraryItemsToDiscover(library, user, include, limit)) : Promise.resolve({ payload: { libraryItems: [], count: 0 }, elapsedSeconds: '0.00' }),
+        wantsListenAgain ? timed(() => libraryFilters.getMediaFinished(library, user, include, limit)) : Promise.resolve({ payload: { items: [], count: 0 }, elapsedSeconds: '0.00' }),
+        wantsNewestAuthors ? timed(() => libraryFilters.getNewestAuthors(library, user, limit)) : Promise.resolve({ payload: { authors: [], count: 0 }, elapsedSeconds: '0.00' })
       ])
 
       const continueSeriesPayload = continueSeriesResult.payload
       // "Continue Series" shelf
-      if (continueSeriesPayload.libraryItems.length) {
+      if (wantsContinueSeries && continueSeriesPayload.libraryItems.length) {
         shelves.push({
           id: 'continue-series',
           label: 'Continue Series',
@@ -402,11 +416,13 @@ class LibraryItem extends Model {
           total: continueSeriesPayload.count
         })
       }
-      Logger.debug(`Loaded ${continueSeriesPayload.libraryItems.length} of ${continueSeriesPayload.count} items for "Continue Series" in ${continueSeriesResult.elapsedSeconds}s`)
+      if (wantsContinueSeries) {
+        Logger.debug(`Loaded ${continueSeriesPayload.libraryItems.length} of ${continueSeriesPayload.count} items for "Continue Series" in ${continueSeriesResult.elapsedSeconds}s`)
+      }
 
       const mostRecentPayload = mostRecentResult.payload
       // "Recently Added" shelf
-      if (mostRecentPayload.libraryItems.length) {
+      if (wantsRecentlyAdded && mostRecentPayload.libraryItems.length) {
         shelves.push({
           id: 'recently-added',
           label: 'Recently Added',
@@ -416,11 +432,13 @@ class LibraryItem extends Model {
           total: mostRecentPayload.count
         })
       }
-      Logger.debug(`Loaded ${mostRecentPayload.libraryItems.length} of ${mostRecentPayload.count} items for "Recently Added" in ${mostRecentResult.elapsedSeconds}s`)
+      if (wantsRecentlyAdded) {
+        Logger.debug(`Loaded ${mostRecentPayload.libraryItems.length} of ${mostRecentPayload.count} items for "Recently Added" in ${mostRecentResult.elapsedSeconds}s`)
+      }
 
       const seriesMostRecentPayload = seriesMostRecentResult.payload
       // "Recent Series" shelf
-      if (seriesMostRecentPayload.series.length) {
+      if (wantsRecentSeries && seriesMostRecentPayload.series.length) {
         shelves.push({
           id: 'recent-series',
           label: 'Recent Series',
@@ -430,11 +448,13 @@ class LibraryItem extends Model {
           total: seriesMostRecentPayload.count
         })
       }
-      Logger.debug(`Loaded ${seriesMostRecentPayload.series.length} of ${seriesMostRecentPayload.count} series for "Recent Series" in ${seriesMostRecentResult.elapsedSeconds}s`)
+      if (wantsRecentSeries) {
+        Logger.debug(`Loaded ${seriesMostRecentPayload.series.length} of ${seriesMostRecentPayload.count} series for "Recent Series" in ${seriesMostRecentResult.elapsedSeconds}s`)
+      }
 
       const discoverLibraryItemsPayload = discoverResult.payload
       // "Discover" shelf
-      if (discoverLibraryItemsPayload.libraryItems.length) {
+      if (wantsDiscover && discoverLibraryItemsPayload.libraryItems.length) {
         shelves.push({
           id: 'discover',
           label: 'Discover',
@@ -444,15 +464,17 @@ class LibraryItem extends Model {
           total: discoverLibraryItemsPayload.count
         })
       }
-      Logger.debug(`Loaded ${discoverLibraryItemsPayload.libraryItems.length} of ${discoverLibraryItemsPayload.count} items for "Discover" in ${discoverResult.elapsedSeconds}s`)
+      if (wantsDiscover) {
+        Logger.debug(`Loaded ${discoverLibraryItemsPayload.libraryItems.length} of ${discoverLibraryItemsPayload.count} items for "Discover" in ${discoverResult.elapsedSeconds}s`)
+      }
 
       const mediaFinishedPayload = mediaFinishedResult.payload
       // "Listen Again" shelf
-      if (mediaFinishedPayload.items.length) {
+      if (wantsListenAgain && mediaFinishedPayload.items.length) {
         const ebookOnlyItemsInProgress = mediaFinishedPayload.items.filter((li) => li.media.ebookFormat && !li.media.numTracks)
         const audioItemsInProgress = mediaFinishedPayload.items.filter((li) => li.media.numTracks || li.mediaType === 'podcast')
 
-        if (audioItemsInProgress.length) {
+        if (shouldIncludeShelf('listen-again') && audioItemsInProgress.length) {
           shelves.push({
             id: 'listen-again',
             label: 'Listen Again',
@@ -463,7 +485,7 @@ class LibraryItem extends Model {
           })
         }
 
-        if (ebookOnlyItemsInProgress.length) {
+        if (shouldIncludeShelf('read-again') && ebookOnlyItemsInProgress.length) {
           // "Read Again" shelf
           shelves.push({
             id: 'read-again',
@@ -475,11 +497,13 @@ class LibraryItem extends Model {
           })
         }
       }
-      Logger.debug(`Loaded ${mediaFinishedPayload.items.length} of ${mediaFinishedPayload.count} items for "Listen/Read Again" in ${mediaFinishedResult.elapsedSeconds}s`)
+      if (wantsListenAgain) {
+        Logger.debug(`Loaded ${mediaFinishedPayload.items.length} of ${mediaFinishedPayload.count} items for "Listen/Read Again" in ${mediaFinishedResult.elapsedSeconds}s`)
+      }
 
       const newestAuthorsPayload = newestAuthorsResult.payload
       // "Newest Authors" shelf
-      if (newestAuthorsPayload.authors.length) {
+      if (wantsNewestAuthors && newestAuthorsPayload.authors.length) {
         shelves.push({
           id: 'newest-authors',
           label: 'Newest Authors',
@@ -489,17 +513,23 @@ class LibraryItem extends Model {
           total: newestAuthorsPayload.count
         })
       }
-      Logger.debug(`Loaded ${newestAuthorsPayload.authors.length} of ${newestAuthorsPayload.count} authors for "Newest Authors" in ${newestAuthorsResult.elapsedSeconds}s`)
+      if (wantsNewestAuthors) {
+        Logger.debug(`Loaded ${newestAuthorsPayload.authors.length} of ${newestAuthorsPayload.count} authors for "Newest Authors" in ${newestAuthorsResult.elapsedSeconds}s`)
+      }
     } else if (library.isPodcast) {
+      const wantsNewestEpisodes = shouldIncludeShelf('newest-episodes')
+      const wantsRecentlyAdded = shouldIncludeShelf('recently-added')
+      const wantsListenAgain = shouldIncludeShelf('listen-again') || shouldIncludeShelf('read-again')
+
       const [newestEpisodesResult, mostRecentResult, mediaFinishedResult] = await Promise.all([
-        timed(() => libraryFilters.getNewestPodcastEpisodes(library, user, limit)),
-        timed(() => libraryFilters.getLibraryItemsMostRecentlyAdded(library, user, include, limit)),
-        timed(() => libraryFilters.getMediaFinished(library, user, include, limit))
+        wantsNewestEpisodes ? timed(() => libraryFilters.getNewestPodcastEpisodes(library, user, limit)) : Promise.resolve({ payload: { libraryItems: [], count: 0 }, elapsedSeconds: '0.00' }),
+        wantsRecentlyAdded ? timed(() => libraryFilters.getLibraryItemsMostRecentlyAdded(library, user, include, limit)) : Promise.resolve({ payload: { libraryItems: [], count: 0 }, elapsedSeconds: '0.00' }),
+        wantsListenAgain ? timed(() => libraryFilters.getMediaFinished(library, user, include, limit)) : Promise.resolve({ payload: { items: [], count: 0 }, elapsedSeconds: '0.00' })
       ])
 
       const newestEpisodesPayload = newestEpisodesResult.payload
       // "Newest Episodes" shelf
-      if (newestEpisodesPayload.libraryItems.length) {
+      if (wantsNewestEpisodes && newestEpisodesPayload.libraryItems.length) {
         shelves.push({
           id: 'newest-episodes',
           label: 'Newest Episodes',
@@ -509,11 +539,13 @@ class LibraryItem extends Model {
           total: newestEpisodesPayload.count
         })
       }
-      Logger.debug(`Loaded ${newestEpisodesPayload.libraryItems.length} of ${newestEpisodesPayload.count} episodes for "Newest Episodes" in ${newestEpisodesResult.elapsedSeconds}s`)
+      if (wantsNewestEpisodes) {
+        Logger.debug(`Loaded ${newestEpisodesPayload.libraryItems.length} of ${newestEpisodesPayload.count} episodes for "Newest Episodes" in ${newestEpisodesResult.elapsedSeconds}s`)
+      }
 
       const mostRecentPayload = mostRecentResult.payload
       // "Recently Added" shelf
-      if (mostRecentPayload.libraryItems.length) {
+      if (wantsRecentlyAdded && mostRecentPayload.libraryItems.length) {
         shelves.push({
           id: 'recently-added',
           label: 'Recently Added',
@@ -523,15 +555,17 @@ class LibraryItem extends Model {
           total: mostRecentPayload.count
         })
       }
-      Logger.debug(`Loaded ${mostRecentPayload.libraryItems.length} of ${mostRecentPayload.count} items for "Recently Added" in ${mostRecentResult.elapsedSeconds}s`)
+      if (wantsRecentlyAdded) {
+        Logger.debug(`Loaded ${mostRecentPayload.libraryItems.length} of ${mostRecentPayload.count} items for "Recently Added" in ${mostRecentResult.elapsedSeconds}s`)
+      }
 
       const mediaFinishedPayload = mediaFinishedResult.payload
       // "Listen Again" shelf
-      if (mediaFinishedPayload.items.length) {
+      if (wantsListenAgain && mediaFinishedPayload.items.length) {
         const ebookOnlyItemsInProgress = mediaFinishedPayload.items.filter((li) => li.media.ebookFormat && !li.media.numTracks)
         const audioItemsInProgress = mediaFinishedPayload.items.filter((li) => li.media.numTracks || li.mediaType === 'podcast')
 
-        if (audioItemsInProgress.length) {
+        if (shouldIncludeShelf('listen-again') && audioItemsInProgress.length) {
           shelves.push({
             id: 'listen-again',
             label: 'Listen Again',
@@ -542,7 +576,7 @@ class LibraryItem extends Model {
           })
         }
 
-        if (ebookOnlyItemsInProgress.length) {
+        if (shouldIncludeShelf('read-again') && ebookOnlyItemsInProgress.length) {
           // "Read Again" shelf
           shelves.push({
             id: 'read-again',
@@ -554,7 +588,9 @@ class LibraryItem extends Model {
           })
         }
       }
-      Logger.debug(`Loaded ${mediaFinishedPayload.items.length} of ${mediaFinishedPayload.count} items for "Listen/Read Again" in ${mediaFinishedResult.elapsedSeconds}s`)
+      if (wantsListenAgain) {
+        Logger.debug(`Loaded ${mediaFinishedPayload.items.length} of ${mediaFinishedPayload.count} items for "Listen/Read Again" in ${mediaFinishedResult.elapsedSeconds}s`)
+      }
     }
 
     Logger.debug(`Loaded ${shelves.length} personalized shelves in ${((Date.now() - fullStart) / 1000).toFixed(2)}s`)

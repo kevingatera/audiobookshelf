@@ -35,6 +35,7 @@ Last updated: 2026-02-28
 - `include=rssfeed` can materially hurt cold personalized responses in some runs.
 - Hybrid model chosen: fast first paint first, then background RSS metadata hydration for visible shelves.
 - Server-side Discover shelf now uses a short-lived cache (`PERSONALIZED_DISCOVER_CACHE_MS`, default 10 minutes) keyed by library/user/include/limit to avoid repeating expensive cold Discover queries after personalized cache invalidation.
+- Personalized endpoint now supports optional shelf filtering via `?shelves=...` (comma-separated shelf ids) to allow fast first-paint subset fetches from clients without changing default behavior.
 
 ## Open PR prep notes (for upstream later)
 
