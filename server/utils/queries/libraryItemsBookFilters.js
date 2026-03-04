@@ -943,7 +943,7 @@ module.exports = {
     const discoverWhere = [
       {
         '$mediaProgresses.isFinished$': {
-          [Sequelize.Op.or]: [null, 0]
+          [Sequelize.Op.or]: [null, false]
         },
         '$mediaProgresses.currentTime$': {
           [Sequelize.Op.or]: [null, 0]
