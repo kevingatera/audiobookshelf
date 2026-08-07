@@ -18,7 +18,7 @@ on:
 jobs:
   run-component-tests:
     name: Run Component Tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lxc]
 
     steps:
       - name: Checkout (push/pull request)

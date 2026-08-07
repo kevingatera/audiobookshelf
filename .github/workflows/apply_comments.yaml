@@ -6,7 +6,7 @@ on:
 jobs:
   help-wanted:
     if: github.event.label.name == 'help wanted'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lxc]
     permissions:
       issues: write
     steps:
@@ -24,7 +24,7 @@ jobs:
 
   config-issue:
     if: github.event.label.name == 'config-issue'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lxc]
     permissions:
       issues: write
     steps:

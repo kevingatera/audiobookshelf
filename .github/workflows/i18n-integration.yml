@@ -10,7 +10,7 @@ on:
 
 jobs:
   update_translations:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lxc]
     steps:
       # Check out the repository
       - name: Checkout repository
