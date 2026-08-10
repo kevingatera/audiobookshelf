@@ -536,7 +536,8 @@ class User extends Model {
         email: DataTypes.STRING,
         pash: DataTypes.STRING,
         type: DataTypes.STRING,
-        token: DataTypes.STRING,
+        // TEXT: access-token JWTs stored here can exceed varchar(255) on postgres.
+        token: DataTypes.TEXT,
         isActive: {
           type: DataTypes.BOOLEAN,
           defaultValue: false
