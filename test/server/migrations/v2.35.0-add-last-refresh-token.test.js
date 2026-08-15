@@ -34,6 +34,7 @@ describe('migration-v2.35.0-add-last-refresh-token', () => {
       const tableDescription = await queryInterface.describeTable('sessions')
       expect(tableDescription.lastRefreshToken).to.exist
       expect(tableDescription.lastRefreshTokenExpiresAt).to.exist
+      expect(tableDescription.lastRefreshToken.type).to.equal('TEXT')
     })
 
     it('should not fail when the columns already exist', async () => {

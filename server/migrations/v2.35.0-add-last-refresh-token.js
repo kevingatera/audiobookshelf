@@ -28,7 +28,7 @@ async function up({ context: { queryInterface, logger } }) {
     if (!hasColumn('lastRefreshToken')) {
       logger.info(`${loggerPrefix} Adding lastRefreshToken column to sessions table`)
       await queryInterface.addColumn('sessions', 'lastRefreshToken', {
-        type: queryInterface.sequelize.Sequelize.DataTypes.STRING,
+        type: queryInterface.sequelize.Sequelize.DataTypes.TEXT,
         allowNull: true
       })
     } else {
