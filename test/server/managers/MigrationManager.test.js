@@ -268,7 +268,7 @@ describe('MigrationManager', () => {
       // Assert
       const tableDescription = await sequelize.getQueryInterface().describeTable('migrationsMeta')
       expect(tableDescription).to.deep.equal({
-        key: { type: 'VARCHAR(255)', allowNull: false, defaultValue: undefined, primaryKey: false, unique: false },
+        key: { type: 'VARCHAR(255)', allowNull: false, defaultValue: undefined, primaryKey: false, unique: true },
         value: { type: 'VARCHAR(255)', allowNull: false, defaultValue: undefined, primaryKey: false, unique: false }
       })
       expect(migrationManager.maxVersion).to.equal('0.0.0')
@@ -287,7 +287,7 @@ describe('MigrationManager', () => {
       // Assert
       const tableDescription = await sequelize.getQueryInterface().describeTable('migrationsMeta')
       expect(tableDescription).to.deep.equal({
-        key: { type: 'VARCHAR(255)', allowNull: false, defaultValue: undefined, primaryKey: false, unique: false },
+        key: { type: 'VARCHAR(255)', allowNull: false, defaultValue: undefined, primaryKey: false, unique: true },
         value: { type: 'VARCHAR(255)', allowNull: false, defaultValue: undefined, primaryKey: false, unique: false }
       })
       expect(migrationManager.maxVersion).to.equal('0.0.0')
@@ -340,6 +340,85 @@ describe('MigrationManager', () => {
 
       expect(manager.databaseVersion).to.equal('1.1.0')
       expect(manager.maxVersion).to.equal('1.2.0')
+    })
+  })
+
+  describe('migrationsMeta duplicate protection', () => {
+    const countMetaRows = async (sequelize) => {
+      const [{ count }] = await sequelize.query('SELECT COUNT(*) AS count FROM migrationsMeta', { type: Sequelize.QueryTypes.SELECT })
+      return count
+    }
+
+    it('does not append version rows on every boot when the table lookup misses an existing table', async () => {
+      // Arrange: the table exists with one row per key, but the existence check reports it missing (Postgres case folding)
+      const sequelize = new Sequelize({ dialect: 'sqlite', storage: ':memory:', logging: false })
+      await sequelize.query('CREATE TABLE migrationsMeta (key VARCHAR(255), value VARCHAR(255))')
+      await sequelize.query("INSERT INTO migrationsMeta (key, value) VALUES ('version', '2.36.0'), ('maxVersion', '2.36.0')")
+      const migrationManager = new MigrationManager(sequelize, false, configPath)
+      migrationManager.serverVersion = '2.37.1'
+      migrationManager.tableExists = sinon.stub().resolves(false)
+
+      // Act: simulate several boots
+      for (let boot = 0; boot < 3; boot++) {
+        await migrationManager.checkOrCreateMigrationsMetaTable()
+      }
+
+      // Assert
+      expect(await countMetaRows(sequelize)).to.equal(2)
+    })
+
+    it('collapses duplicate rows to one per key, keeping the highest semver value', async () => {
+      // Arrange: duplicates as left behind by repeated boots on Postgres
+      const sequelize = new Sequelize({ dialect: 'sqlite', storage: ':memory:', logging: false })
+      await sequelize.query('CREATE TABLE migrationsMeta (key VARCHAR(255), value VARCHAR(255))')
+      await sequelize.query(
+        "INSERT INTO migrationsMeta (key, value) VALUES ('version', '2.9.0'), ('version', '2.36.0'), ('version', '0.0.0'), ('maxVersion', '0.0.0'), ('maxVersion', '2.36.0'), ('maxVersion', '2.35.0')"
+      )
+      const migrationManager = new MigrationManager(sequelize, false, configPath)
+      migrationManager.serverVersion = '2.37.1'
+
+      // Act
+      await migrationManager.checkOrCreateMigrationsMetaTable()
+
+      // Assert
+      const rows = await sequelize.query('SELECT key, value FROM migrationsMeta ORDER BY key', { type: Sequelize.QueryTypes.SELECT })
+      expect(rows).to.deep.equal([
+        { key: 'maxVersion', value: '2.36.0' },
+        { key: 'version', value: '2.36.0' }
+      ])
+    })
+
+    it('leaves a collapsed table unchanged on the next boot', async () => {
+      const sequelize = new Sequelize({ dialect: 'sqlite', storage: ':memory:', logging: false })
+      await sequelize.query('CREATE TABLE migrationsMeta (key VARCHAR(255), value VARCHAR(255))')
+      await sequelize.query("INSERT INTO migrationsMeta (key, value) VALUES ('version', '2.36.0'), ('version', '0.0.0'), ('maxVersion', '2.36.0')")
+      const migrationManager = new MigrationManager(sequelize, false, configPath)
+      migrationManager.serverVersion = '2.37.1'
+
+      await migrationManager.checkOrCreateMigrationsMetaTable()
+      const afterFirst = await sequelize.query('SELECT key, value FROM migrationsMeta ORDER BY key', { type: Sequelize.QueryTypes.SELECT })
+      await migrationManager.checkOrCreateMigrationsMetaTable()
+      const afterSecond = await sequelize.query('SELECT key, value FROM migrationsMeta ORDER BY key', { type: Sequelize.QueryTypes.SELECT })
+
+      expect(afterFirst).to.deep.equal([
+        { key: 'maxVersion', value: '2.36.0' },
+        { key: 'version', value: '2.36.0' }
+      ])
+      expect(afterSecond).to.deep.equal(afterFirst)
+    })
+
+    it('looks up the migrationsMeta table case-insensitively on postgres', async () => {
+      const sequelize = new Sequelize({ dialect: 'sqlite', storage: ':memory:', logging: false })
+      sinon.stub(sequelize, 'getDialect').returns('postgres')
+      const querySpy = sinon.stub(sequelize, 'query').resolves([{ found: 1 }])
+      const migrationManager = new MigrationManager(sequelize, false, configPath)
+
+      const exists = await migrationManager.tableExists('migrationsMeta')
+
+      expect(exists).to.equal(true)
+      const [sql, options] = querySpy.firstCall.args
+      expect(sql).to.include('lower(table_name) = lower(:tableName)')
+      expect(options.replacements).to.deep.equal({ tableName: 'migrationsMeta' })
     })
   })
 

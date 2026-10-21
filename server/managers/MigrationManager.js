@@ -247,16 +247,53 @@ class MigrationManager {
           allowNull: false
         }
       })
-      await this.sequelize.query(`INSERT INTO ${MigrationManager.MIGRATIONS_META_TABLE} (key, value) VALUES ('version', :version), ('maxVersion', '0.0.0')`, {
-        replacements: { version: this.isDatabaseNew ? this.serverVersion : '0.0.0' },
-        type: Sequelize.QueryTypes.INSERT
-      })
       Logger.debug(`[MigrationManager] Created migrationsMeta table: "${MigrationManager.MIGRATIONS_META_TABLE}"`)
     }
+
+    // Boots must never append meta rows. Collapse any duplicates left by earlier builds, then enforce one row per key.
+    // The insert is an upsert, so a missed table lookup cannot create a second `version` or `maxVersion` row.
+    await this.collapseDuplicateMigrationsMetaRows()
+    await this.sequelize.query(`CREATE UNIQUE INDEX IF NOT EXISTS ${MigrationManager.MIGRATIONS_META_TABLE}_key_unique ON ${MigrationManager.MIGRATIONS_META_TABLE} (key)`)
+    await this.sequelize.query(`INSERT INTO ${MigrationManager.MIGRATIONS_META_TABLE} (key, value) VALUES ('version', :version), ('maxVersion', '0.0.0') ON CONFLICT (key) DO NOTHING`, {
+      replacements: { version: this.isDatabaseNew ? this.serverVersion : '0.0.0' },
+      type: Sequelize.QueryTypes.INSERT
+    })
+  }
+
+  /**
+   * Keeps the highest semver value for each key and removes the other rows. Does nothing when each key has one row.
+   */
+  async collapseDuplicateMigrationsMetaRows() {
+    const table = MigrationManager.MIGRATIONS_META_TABLE
+    const rows = await this.sequelize.query(`SELECT key, value FROM ${table}`, { type: Sequelize.QueryTypes.SELECT })
+
+    const valuesByKey = new Map()
+    for (const row of rows) {
+      valuesByKey.set(row.key, [...(valuesByKey.get(row.key) || []), row.value])
+    }
+    const duplicates = [...valuesByKey.entries()].filter(([, values]) => values.length > 1)
+    if (!duplicates.length) return
+
+    Logger.warn(`[MigrationManager] Collapsing duplicate migrationsMeta rows for keys: ${duplicates.map(([key]) => key).join(', ')}`)
+    await this.sequelize.transaction(async (transaction) => {
+      for (const [key, values] of duplicates) {
+        const highest = values.reduce((best, value) => (semver.valid(value) && (!semver.valid(best) || semver.gt(value, best)) ? value : best))
+        await this.sequelize.query(`DELETE FROM ${table} WHERE key = :key`, { replacements: { key }, transaction })
+        await this.sequelize.query(`INSERT INTO ${table} (key, value) VALUES (:key, :value)`, { replacements: { key, value: highest }, transaction })
+      }
+    })
   }
 
   async tableExists(tableName) {
     const queryInterface = this.sequelize.getQueryInterface()
+    if (typeof this.sequelize.getDialect === 'function' && this.sequelize.getDialect() === 'postgres') {
+      // The table is created unquoted, so Postgres stores it lower-cased. An exact-case lookup misses it on every boot.
+      const [row] = await this.sequelize.query(`SELECT 1 AS found FROM information_schema.tables WHERE table_schema = current_schema() AND lower(table_name) = lower(:tableName)`, {
+        replacements: { tableName },
+        type: Sequelize.QueryTypes.SELECT
+      })
+      return !!row
+    }
     if (typeof queryInterface.tableExists === 'function') {
       return queryInterface.tableExists(tableName)
     }
