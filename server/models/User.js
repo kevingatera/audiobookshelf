@@ -18,12 +18,16 @@ class UserCache {
   }
 
   getByEmail(email) {
-    const user = this.cache.find((u) => u.email === email)
+    if (!email) return null
+    const normalizedEmail = email.toLowerCase()
+    const user = this.cache.find((u) => u.email && u.email.toLowerCase() === normalizedEmail)
     return user
   }
 
   getByUsername(username) {
-    const user = this.cache.find((u) => u.username === username)
+    if (!username) return null
+    const normalizedUsername = username.toLowerCase()
+    const user = this.cache.find((u) => u.username && u.username.toLowerCase() === normalizedUsername)
     return user
   }
 
@@ -348,11 +352,13 @@ class User extends Model {
   static async getUserByUsername(username) {
     if (!username) return null
 
-    const cachedUser = userCache.getByUsername(username)
+    const normalizedUsername = username.toLowerCase()
+
+    const cachedUser = userCache.getByUsername(normalizedUsername)
     if (cachedUser) return cachedUser
 
     const user = await this.findOne({
-      where: sequelize.where(sequelize.fn('lower', sequelize.col('username')), username.toLowerCase()),
+      where: sequelize.where(sequelize.fn('LOWER', sequelize.col('username')), normalizedUsername),
       include: this.sequelize.models.mediaProgress
     })
 
@@ -369,11 +375,13 @@ class User extends Model {
   static async getUserByEmail(email) {
     if (!email) return null
 
-    const cachedUser = userCache.getByEmail(email)
+    const normalizedEmail = email.toLowerCase()
+
+    const cachedUser = userCache.getByEmail(normalizedEmail)
     if (cachedUser) return cachedUser
 
     const user = await this.findOne({
-      where: sequelize.where(sequelize.fn('lower', sequelize.col('email')), email.toLowerCase()),
+      where: sequelize.where(sequelize.fn('LOWER', sequelize.col('email')), normalizedEmail),
       include: this.sequelize.models.mediaProgress
     })
 
