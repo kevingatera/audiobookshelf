@@ -4,7 +4,7 @@ const Logger = require('../Logger')
 const SocketAuthority = require('../SocketAuthority')
 const Database = require('../Database')
 const { sort } = require('../libs/fastSort')
-const { toNumber, isNullOrNaN, isUUID } = require('../utils/index')
+const { toNumber, isNullOrNaN, isUUID, isMinifiedRequest } = require('../utils/index')
 const userStats = require('../utils/queries/userStats')
 const parseUserAgent = require('../utils/parsers/parseUserAgent')
 
@@ -155,22 +155,10 @@ class MeController {
    * @param {Response} res
    */
   async getListeningSessions(req, res) {
-    const listeningSessions = await this.getUserListeningSessionsHelper(req.user.id)
-
     const itemsPerPage = toNumber(req.query.itemsPerPage, 10) || 10
     const page = toNumber(req.query.page, 0)
 
-    const start = page * itemsPerPage
-    const sessions = listeningSessions.slice(start, start + itemsPerPage)
-
-    const payload = {
-      total: listeningSessions.length,
-      numPages: Math.ceil(listeningSessions.length / itemsPerPage),
-      page,
-      itemsPerPage,
-      sessions
-    }
-
+    const payload = await this.getUserListeningSessionsPageHelper(req.user.id, page, itemsPerPage)
     res.json(payload)
   }
 
@@ -226,7 +214,11 @@ class MeController {
    * @param {Response} res
    */
   async getListeningStats(req, res) {
-    const listeningStats = await this.getUserListeningStatsHelpers(req.user.id)
+    const minified = isMinifiedRequest(req)
+    const listeningStats = await this.getUserListeningStatsHelpers(req.user.id, {
+      includeItems: !minified,
+      includeRecentSessions: !minified
+    })
     res.json(listeningStats)
   }
 

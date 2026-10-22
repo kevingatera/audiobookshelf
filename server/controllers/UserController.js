@@ -4,7 +4,7 @@ const Logger = require('../Logger')
 const SocketAuthority = require('../SocketAuthority')
 const Database = require('../Database')
 
-const { toNumber } = require('../utils/index')
+const { toNumber, isMinifiedRequest } = require('../utils/index')
 
 /**
  * @typedef RequestUserObject
@@ -432,14 +432,12 @@ class UserController {
    * @param {Response} res
    */
   async getListeningSessions(req, res) {
-    var listeningSessions = await this.getUserListeningSessionsHelper(req.params.id)
-
     const itemsPerPage = toNumber(req.query.itemsPerPage, 10) || 10
     const page = toNumber(req.query.page, 0)
 
-    const start = page * itemsPerPage
+    const payload = await this.getUserListeningSessionsPageHelper(req.params.id, page, itemsPerPage)
     // Map user to sessions to match the format of the sessions endpoint
-    const sessions = listeningSessions.slice(start, start + itemsPerPage).map((session) => {
+    payload.sessions = payload.sessions.map((session) => {
       return {
         ...session,
         user: {
@@ -448,15 +446,6 @@ class UserController {
         }
       }
     })
-
-    const payload = {
-      total: listeningSessions.length,
-      numPages: Math.ceil(listeningSessions.length / itemsPerPage),
-      page,
-      itemsPerPage,
-      sessions
-    }
-
     res.json(payload)
   }
 
@@ -469,7 +458,11 @@ class UserController {
    * @param {Response} res
    */
   async getListeningStats(req, res) {
-    var listeningStats = await this.getUserListeningStatsHelpers(req.params.id)
+    const minified = isMinifiedRequest(req)
+    const listeningStats = await this.getUserListeningStatsHelpers(req.params.id, {
+      includeItems: !minified,
+      includeRecentSessions: !minified
+    })
     res.json(listeningStats)
   }
 
