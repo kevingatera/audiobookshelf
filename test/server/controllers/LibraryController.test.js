@@ -176,3 +176,42 @@ describe('LibraryController.downloadMultiple', () => {
     expect(pathObjects[0].path).to.equal('/test-lib/allowed')
   })
 })
+
+describe('LibraryController.getUserPersonalizedShelves', () => {
+  let loggerErrorStub
+
+  beforeEach(async () => {
+    global.ServerSettings = {}
+    Database.sequelize = new Sequelize({ dialect: 'sqlite', storage: ':memory:', logging: false })
+    Database.sequelize.uppercaseFirst = (str) => (str ? `${str[0].toUpperCase()}${str.substr(1)}` : '')
+    await Database.buildModels()
+    loggerErrorStub = sinon.stub(Logger, 'error')
+  })
+
+  afterEach(async () => {
+    sinon.restore()
+    await Database.sequelize.close()
+  })
+
+  it('returns the shelves when they load', async () => {
+    const shelves = [{ id: 'recently-added', entities: [] }]
+    sinon.stub(Database.libraryItemModel, 'getPersonalizedShelves').resolves(shelves)
+    const res = { json: sinon.spy(), sendStatus: sinon.spy() }
+
+    await LibraryController.getUserPersonalizedShelves({ library: { id: 'lib-1' }, user: {}, query: {} }, res)
+
+    expect(res.json.calledOnceWithExactly(shelves)).to.equal(true)
+    expect(res.sendStatus.called).to.equal(false)
+  })
+
+  it('returns 500 and logs when a shelf query fails instead of returning empty shelves', async () => {
+    sinon.stub(Database.libraryItemModel, 'getPersonalizedShelves').rejects(new Error('shelf query failed'))
+    const res = { json: sinon.spy(), sendStatus: sinon.spy() }
+
+    await LibraryController.getUserPersonalizedShelves({ library: { id: 'lib-1' }, user: {}, query: {} }, res)
+
+    expect(res.sendStatus.calledOnceWithExactly(500)).to.equal(true)
+    expect(res.json.called).to.equal(false)
+    expect(loggerErrorStub.calledOnce).to.equal(true)
+  })
+})
