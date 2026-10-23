@@ -4,6 +4,7 @@ const Logger = require('../Logger')
 const SocketAuthority = require('../SocketAuthority')
 const Database = require('../Database')
 const { dialectFor } = require('../utils/dialectAdapter')
+const { dumpArgs, restoreArgs, runPostgresTool } = require('../utils/postgresTools')
 
 const cron = require('../libs/nodeCron')
 const fs = require('../libs/fsExtra')
@@ -30,6 +31,18 @@ class BackupManager {
 
   get backupPath() {
     return global.ServerSettings.backupPath
+  }
+
+  /** Archive entry name for the database in this server. */
+  get currentBackupEntry() {
+    return dialectFor(Database.sequelize).fileBased ? 'absdatabase.sqlite' : 'absdatabase.postgres.dump'
+  }
+
+  /** Dialect of the database a backup archive was made from, or null when the archive has no database entry. */
+  static backupDialectOf(entries) {
+    if (entries['absdatabase.postgres.dump']) return 'postgres'
+    if (entries['absdatabase.sqlite']) return 'sqlite'
+    return null
   }
 
   get backupPathEnvSet() {
@@ -131,11 +144,19 @@ class BackupManager {
       await fs.remove(tempPath).catch((err) => Logger.error(`[BackupManager] Failed to remove rejected backup file "${tempPath}"`, err))
       return res.status(400).send('Failed to read backup file - backup might not be a valid .zip file')
     }
-    if (!entries['absdatabase.sqlite']) {
-      Logger.error(`[BackupManager] Invalid backup with no absdatabase.sqlite file - might be a backup created on an old Audiobookshelf server.`)
+    const uploadedDialect = BackupManager.backupDialectOf(entries)
+    if (!uploadedDialect) {
+      Logger.error(`[BackupManager] Invalid backup with no database file - might be a backup created on an old Audiobookshelf server.`)
       await zip.close().catch(() => {})
       await fs.remove(tempPath).catch((err) => Logger.error(`[BackupManager] Failed to remove rejected backup file "${tempPath}"`, err))
       return res.status(500).send('Invalid backup with no absdatabase.sqlite file - might be a backup created on an old Audiobookshelf server.')
+    }
+    const currentDialect = dialectFor(Database.sequelize).fileBased ? 'sqlite' : 'postgres'
+    if (uploadedDialect !== currentDialect) {
+      Logger.error(`[BackupManager] Backup uses ${uploadedDialect}, this server uses ${currentDialect}`)
+      await zip.close().catch(() => {})
+      await fs.remove(tempPath).catch((err) => Logger.error(`[BackupManager] Failed to remove rejected backup file "${tempPath}"`, err))
+      return res.status(400).send(`This backup was made with the ${uploadedDialect} database. This server uses ${currentDialect}.`)
     }
 
     const detailsEntry = entries['details']
@@ -205,6 +226,16 @@ class BackupManager {
 
     const entries = await zip.entries()
 
+    const backupDialect = BackupManager.backupDialectOf(entries)
+    const currentDialect = dialectFor(Database.sequelize).fileBased ? 'sqlite' : 'postgres'
+    if (backupDialect === 'postgres' && currentDialect === 'postgres') {
+      return this.requestApplyPostgresBackup(apiCacheManager, backup, zip, entries, res)
+    }
+    if (backupDialect !== currentDialect) {
+      await zip.close()
+      return res.status(400).send(`This backup was made with the ${backupDialect || 'unknown'} database. This server uses ${currentDialect}.`)
+    }
+
     // Ensure backup has an absdatabase.sqlite file
     if (!Object.keys(entries).includes('absdatabase.sqlite')) {
       Logger.error(`[BackupManager] Cannot apply old backup ${backup.fullPath}`)
@@ -264,6 +295,38 @@ class BackupManager {
     res.sendStatus(200)
 
     // Triggers browser refresh for all clients
+    SocketAuthority.emitter('backup_applied')
+  }
+
+  async requestApplyPostgresBackup(apiCacheManager, backup, zip, entries, res) {
+    await Database.disconnect()
+
+    const dumpPath = Path.join(global.ConfigPath, 'absdatabase-temp.postgres.dump')
+    try {
+      await zip.extract('absdatabase.postgres.dump', dumpPath)
+      await this.restorePostgresDb(dumpPath)
+      Logger.info(`[BackupManager] Restored postgres database from backup "${backup.filename}"`)
+    } catch (error) {
+      // A failed restore rolls back, so the original data is still there. Reconnect and report.
+      Logger.error(`[BackupManager] Failed to restore postgres backup`, error)
+      await zip.close().catch(() => {})
+      await fs.remove(dumpPath).catch(() => {})
+      await Database.reconnect()
+      return res.status(500).send(`Failed to apply postgres backup: ${error?.message || 'Unknown Error'}`)
+    }
+    await fs.remove(dumpPath).catch(() => {})
+
+    await fs.ensureDir(this.ItemsMetadataPath)
+    await zip.extract('metadata-items/', this.ItemsMetadataPath)
+    await fs.ensureDir(this.AuthorsMetadataPath)
+    await zip.extract('metadata-authors/', this.AuthorsMetadataPath)
+    await zip.close()
+
+    await Database.reconnect()
+    await apiCacheManager.reset()
+    await CacheManager.purgeAll()
+
+    res.sendStatus(200)
     SocketAuthority.emitter('backup_applied')
   }
 
@@ -339,9 +402,10 @@ class BackupManager {
 
     await fs.ensureDir(this.AuthorsMetadataPath)
 
-    // Create backup sqlite file
-    const sqliteBackupPath = await this.backupSqliteDb(newBackup).catch((error) => {
-      Logger.error(`[BackupManager] Failed to backup sqlite db`, error)
+    // Create the database copy: a sqlite file, or a pg_dump custom-format archive on postgres
+    const isFileDatabase = dialectFor(Database.sequelize).fileBased
+    const sqliteBackupPath = await (isFileDatabase ? this.backupSqliteDb(newBackup) : this.backupPostgresDb(newBackup)).catch((error) => {
+      Logger.error(`[BackupManager] Failed to backup ${isFileDatabase ? 'sqlite' : 'postgres'} db`, error)
       const errorMsg = error?.message || error || 'Unknown Error'
       NotificationManager.onBackupFailed(errorMsg)
       return false
@@ -351,8 +415,8 @@ class BackupManager {
       return false
     }
 
-    // Zip sqlite file, /metadata/items, and /metadata/authors folders
-    const zipResult = await this.zipBackup(sqliteBackupPath, newBackup).catch((error) => {
+    // Zip the database copy, /metadata/items, and /metadata/authors folders
+    const zipResult = await this.zipBackup(sqliteBackupPath, newBackup, this.currentBackupEntry).catch((error) => {
       Logger.error(`[BackupManager] Backup Failed ${error}`)
       const errorMsg = error?.message || error || 'Unknown Error'
       NotificationManager.onBackupFailed(errorMsg)
@@ -403,14 +467,29 @@ class BackupManager {
   }
 
   /**
+   * Dumps the Postgres database to a custom-format archive with pg_dump.
+   * @param {Backup} backup
+   * @returns {Promise<string>} path of the dump file
+   */
+  async backupPostgresDb(backup) {
+    const dumpFilePath = Path.join(global.ConfigPath, `absdatabase.${backup.id}.postgres.dump`)
+    await runPostgresTool({ name: 'pg_dump', args: dumpArgs(process.env.DATABASE_URL, dumpFilePath), databaseUrl: process.env.DATABASE_URL })
+    return dumpFilePath
+  }
+
+  /**
+   * Replaces the Postgres database with a custom-format dump, inside one transaction.
+   * @param {string} dumpFilePath
+   */
+  async restorePostgresDb(dumpFilePath) {
+    await runPostgresTool({ name: 'pg_restore', args: restoreArgs(process.env.DATABASE_URL, dumpFilePath), databaseUrl: process.env.DATABASE_URL })
+  }
+
+  /**
    * @see https://github.com/TryGhost/node-sqlite3/pull/1116
    * @param {Backup} backup
    */
   backupSqliteDb(backup) {
-    if (!dialectFor(Database.sequelize).fileBased) {
-      // pg_dump based backups arrive with the native backup change
-      return Promise.reject(new Error(`Backups are not available for the ${Database.dialect} dialect yet`))
-    }
     const db = new sqlite3.Database(Database.dbPath)
     const dbFilePath = Path.join(global.ConfigPath, `absdatabase.${backup.id}.sqlite`)
     return new Promise(async (resolve, reject) => {
@@ -433,7 +512,7 @@ class BackupManager {
     })
   }
 
-  zipBackup(sqliteBackupPath, backup) {
+  zipBackup(sqliteBackupPath, backup, entryName = 'absdatabase.sqlite') {
     return new Promise((resolve, reject) => {
       // create a file to stream archive data to
       const output = fs.createWriteStream(backup.fullPath)
@@ -497,7 +576,7 @@ class BackupManager {
       // pipe archive data to the file
       archive.pipe(output)
 
-      archive.file(sqliteBackupPath, { name: 'absdatabase.sqlite' })
+      archive.file(sqliteBackupPath, { name: entryName })
       archive.directory(this.ItemsMetadataPath, 'metadata-items')
       archive.directory(this.AuthorsMetadataPath, 'metadata-authors')
 
