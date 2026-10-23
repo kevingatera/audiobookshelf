@@ -22,20 +22,38 @@ on:
       - tsconfig.server.json
       - Dockerfile
 
+# github.token pushes to GHCR. The package permission is required for that.
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   build:
-    if: ${{ !contains(github.event.head_commit.message, 'skip ci') && github.repository == 'advplyr/audiobookshelf' }}
+    # Upstream builds publish to Docker Hub and GHCR. Fork builds publish to GHCR only.
+    # The fork name is hard-coded here: renaming the repository disables its builds.
+    if: ${{ !contains(github.event.head_commit.message, 'skip ci') && (github.repository == 'advplyr/audiobookshelf' || github.repository == 'kevingatera/audiobookshelf') }}
     runs-on: ubuntu-24.04
 
     steps:
       - name: Check out
         uses: actions/checkout@v4
 
-      - name: Docker meta
+      - name: Docker meta (upstream)
+        if: ${{ github.repository == 'advplyr/audiobookshelf' }}
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: advplyr/audiobookshelf,ghcr.io/${{ github.repository_owner }}/audiobookshelf
+          tags: |
+            type=edge,branch=master
+            type=semver,pattern={{version}}
+
+      - name: Docker meta (fork)
+        if: ${{ github.repository != 'advplyr/audiobookshelf' }}
+        id: meta-fork
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/audiobookshelf
           tags: |
             type=edge,branch=master
             type=semver,pattern={{version}}
@@ -55,6 +73,7 @@ jobs:
             ${{ runner.os }}-buildx-
 
       - name: Login to Dockerhub
+        if: ${{ github.repository == 'advplyr/audiobookshelf' }}
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -65,13 +84,14 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
-          password: ${{ secrets.GHCR_PASSWORD }}
+          password: ${{ github.token }}
 
       - name: Build image
         uses: docker/build-push-action@v6
         with:
-          tags: ${{ github.event.inputs.tags || steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          # Manual runs take a tag suffix. Build the full GHCR reference from it, so a default of "latest" never resolves to Docker Hub.
+          tags: ${{ github.event_name == 'workflow_dispatch' && format('ghcr.io/{0}/audiobookshelf:{1}', github.repository_owner, github.event.inputs.tags) || (github.repository == 'advplyr/audiobookshelf' && steps.meta.outputs.tags || steps.meta-fork.outputs.tags) }}
+          labels: ${{ github.repository == 'advplyr/audiobookshelf' && steps.meta.outputs.labels || steps.meta-fork.outputs.labels }}
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
