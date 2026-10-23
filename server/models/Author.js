@@ -1,5 +1,6 @@
 const { DataTypes, Model, where, fn, col } = require('sequelize')
 const parseNameString = require('../utils/parsers/parseNameString')
+const { dialectFor } = require('../utils/dialectAdapter')
 
 class Author extends Model {
   constructor(values, options) {
@@ -148,10 +149,7 @@ class Author extends Model {
         indexes: [
           {
             fields: [
-              {
-                name: 'name',
-                collate: 'NOCASE'
-              }
+              dialectFor(sequelize).indexField('name')
             ]
           },
           // {

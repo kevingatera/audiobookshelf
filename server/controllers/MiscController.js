@@ -303,7 +303,7 @@ class MiscController {
     const tags = []
     const books = await Database.bookModel.findAll({
       attributes: ['tags'],
-      where: Sequelize.where(Sequelize.fn('json_array_length', Sequelize.col('tags')), {
+      where: Sequelize.where(Sequelize.literal(Database.adapter.jsonArrayLength('tags')), {
         [Sequelize.Op.gt]: 0
       })
     })
@@ -315,7 +315,7 @@ class MiscController {
 
     const podcasts = await Database.podcastModel.findAll({
       attributes: ['tags'],
-      where: Sequelize.where(Sequelize.fn('json_array_length', Sequelize.col('tags')), {
+      where: Sequelize.where(Sequelize.literal(Database.adapter.jsonArrayLength('tags')), {
         [Sequelize.Op.gt]: 0
       })
     })
@@ -441,7 +441,7 @@ class MiscController {
     const genres = []
     const books = await Database.bookModel.findAll({
       attributes: ['genres'],
-      where: Sequelize.where(Sequelize.fn('json_array_length', Sequelize.col('genres')), {
+      where: Sequelize.where(Sequelize.literal(Database.adapter.jsonArrayLength('genres')), {
         [Sequelize.Op.gt]: 0
       })
     })
@@ -453,7 +453,7 @@ class MiscController {
 
     const podcasts = await Database.podcastModel.findAll({
       attributes: ['genres'],
-      where: Sequelize.where(Sequelize.fn('json_array_length', Sequelize.col('genres')), {
+      where: Sequelize.where(Sequelize.literal(Database.adapter.jsonArrayLength('genres')), {
         [Sequelize.Op.gt]: 0
       })
     })

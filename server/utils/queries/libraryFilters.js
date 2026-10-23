@@ -244,9 +244,9 @@ module.exports = {
       }
       if (!user.permissions?.accessAllTags && user.permissions?.itemTagsSelected?.length) {
         if (user.permissions.selectedTagsNotAccessible) {
-          attrQuery += ' AND (SELECT count(*) FROM json_each(tags) WHERE json_valid(tags) AND json_each.value IN (:userTagsSelected)) = 0'
+          attrQuery += ` AND ${Database.adapter.jsonArrayContainsAny('tags', 'userTagsSelected')} = 0`
         } else {
-          attrQuery += ' AND (SELECT count(*) FROM json_each(tags) WHERE json_valid(tags) AND json_each.value IN (:userTagsSelected)) > 0'
+          attrQuery += ` AND ${Database.adapter.jsonArrayContainsAny('tags', 'userTagsSelected')} > 0`
         }
       }
       seriesWhere.push(

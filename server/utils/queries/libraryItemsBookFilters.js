@@ -27,10 +27,10 @@ module.exports = {
     if (!user.permissions?.accessAllTags && user.permissions?.itemTagsSelected?.length) {
       replacements['userTagsSelected'] = user.permissions.itemTagsSelected
       if (user.permissions.selectedTagsNotAccessible) {
-        bookWhere.push(Sequelize.where(Sequelize.literal(`(SELECT count(*) FROM json_each(tags) WHERE json_valid(tags) AND json_each.value IN (:userTagsSelected))`), 0))
+        bookWhere.push(Sequelize.where(Sequelize.literal(Database.adapter.jsonArrayContainsAny('tags', 'userTagsSelected')), 0))
       } else {
         bookWhere.push(
-          Sequelize.where(Sequelize.literal(`(SELECT count(*) FROM json_each(tags) WHERE json_valid(tags) AND json_each.value IN (:userTagsSelected))`), {
+          Sequelize.where(Sequelize.literal(Database.adapter.jsonArrayContainsAny('tags', 'userTagsSelected')), {
             [Sequelize.Op.gte]: 1
           })
         )
@@ -160,7 +160,7 @@ module.exports = {
       } else if (value === 'ebook-in-progress') {
         // Filters for ebook only
         mediaWhere = [
-          Sequelize.where(Sequelize.fn('json_array_length', Sequelize.col('audioFiles')), 0),
+          Sequelize.where(Sequelize.literal(Database.adapter.jsonArrayLength('audioFiles')), 0),
           {
             '$mediaProgresses.ebookProgress$': {
               [Sequelize.Op.gt]: 0
@@ -173,7 +173,7 @@ module.exports = {
       } else if (value === 'ebook-finished') {
         // Filters for ebook only
         mediaWhere = [
-          Sequelize.where(Sequelize.fn('json_array_length', Sequelize.col('audioFiles')), 0),
+          Sequelize.where(Sequelize.literal(Database.adapter.jsonArrayLength('audioFiles')), 0),
           {
             '$mediaProgresses.isFinished$': true,
             ebookFile: {
@@ -189,7 +189,7 @@ module.exports = {
     } else if (group === 'explicit') {
       mediaWhere['explicit'] = true
     } else if (['genres', 'tags', 'narrators'].includes(group)) {
-      mediaWhere[group] = Sequelize.where(Sequelize.literal(`(SELECT count(*) FROM json_each(${group}) WHERE json_valid(${group}) AND json_each.value = :filterValue)`), {
+      mediaWhere[group] = Sequelize.where(Sequelize.literal(Database.adapter.jsonArrayContainsValue(group, 'filterValue')), {
         [Sequelize.Op.gte]: 1
       })
       replacements.filterValue = value
@@ -199,13 +199,13 @@ module.exports = {
       mediaWhere['language'] = value
     } else if (group === 'tracks') {
       if (value === 'none') {
-        mediaWhere = Sequelize.where(Sequelize.fn('json_array_length', Sequelize.col('audioFiles')), 0)
+        mediaWhere = Sequelize.where(Sequelize.literal(Database.adapter.jsonArrayLength('audioFiles')), 0)
       } else if (value === 'multi') {
-        mediaWhere = Sequelize.where(Sequelize.fn('json_array_length', Sequelize.col('audioFiles')), {
+        mediaWhere = Sequelize.where(Sequelize.literal(Database.adapter.jsonArrayLength('audioFiles')), {
           [Sequelize.Op.gt]: 1
         })
       } else {
-        mediaWhere = Sequelize.where(Sequelize.fn('json_array_length', Sequelize.col('audioFiles')), 1)
+        mediaWhere = Sequelize.where(Sequelize.literal(Database.adapter.jsonArrayLength('audioFiles')), 1)
       }
     } else if (group === 'ebooks') {
       if (value === 'ebook') {
@@ -226,7 +226,7 @@ module.exports = {
         }
       } else if (['genres', 'tags', 'narrators', 'chapters'].includes(value)) {
         mediaWhere[value] = {
-          [Sequelize.Op.or]: [null, Sequelize.where(Sequelize.fn('json_array_length', Sequelize.col(value)), 0)]
+          [Sequelize.Op.or]: [null, Sequelize.where(Sequelize.literal(Database.adapter.jsonArrayLength(value)), 0)]
         }
       } else if (value === 'authors') {
         mediaWhere['$authors.id$'] = null
@@ -236,7 +236,7 @@ module.exports = {
     } else if (group === 'publishedDecades') {
       const startYear = parseInt(value)
       const endYear = parseInt(value, 10) + 9
-      mediaWhere = Sequelize.where(Sequelize.literal('CAST(publishedYear AS INTEGER)'), {
+      mediaWhere = Sequelize.where(Sequelize.literal(Database.adapter.safeTextToInteger('publishedYear')), {
         [Sequelize.Op.between]: [startYear, endYear]
       })
     }
@@ -256,9 +256,9 @@ module.exports = {
 
     const getTitleOrder = () => {
       if (global.ServerSettings.sortingIgnorePrefix) {
-        return [Sequelize.literal('`libraryItem`.`titleIgnorePrefix` COLLATE NOCASE'), dir]
+        return [Sequelize.literal(Database.adapter.noCaseOrder(Database.adapter.column('libraryItem', 'titleIgnorePrefix'))), dir]
       } else {
-        return [Sequelize.literal('`libraryItem`.`title` COLLATE NOCASE'), dir]
+        return [Sequelize.literal(Database.adapter.noCaseOrder(Database.adapter.column('libraryItem', 'title'))), dir]
       }
     }
 
@@ -273,21 +273,21 @@ module.exports = {
     } else if (sortBy === 'media.duration') {
       return [['duration', dir]]
     } else if (sortBy === 'media.metadata.publishedYear') {
-      return [[Sequelize.literal(`CAST(\`book\`.\`publishedYear\` AS INTEGER)`), dir]]
+      return [[Sequelize.literal(Database.adapter.safeTextToInteger(Database.adapter.column('book', 'publishedYear'))), dir]]
     } else if (sortBy === 'media.metadata.authorNameLF') {
       // Sort by author name last first, secondary sort by title
-      return [[Sequelize.literal('`libraryItem`.`authorNamesLastFirst` COLLATE NOCASE'), dir], getTitleOrder()]
+      return [[Sequelize.literal(Database.adapter.noCaseOrder(Database.adapter.column('libraryItem', 'authorNamesLastFirst'))), dir], getTitleOrder()]
     } else if (sortBy === 'media.metadata.authorName') {
       // Sort by author name first last, secondary sort by title
-      return [[Sequelize.literal('`libraryItem`.`authorNamesFirstLast` COLLATE NOCASE'), dir], getTitleOrder()]
+      return [[Sequelize.literal(Database.adapter.noCaseOrder(Database.adapter.column('libraryItem', 'authorNamesFirstLast'))), dir], getTitleOrder()]
     } else if (sortBy === 'media.metadata.title') {
       if (collapseseries) {
-        return [[Sequelize.literal('display_title COLLATE NOCASE'), dir]]
+        return [[Sequelize.literal(Database.adapter.noCaseOrder('display_title')), dir]]
       }
       return [getTitleOrder()]
     } else if (sortBy === 'sequence') {
       const nullDir = sortDesc ? 'DESC NULLS FIRST' : 'ASC NULLS LAST'
-      return [[Sequelize.literal(`CAST(\`series.bookSeries.sequence\` AS FLOAT) ${nullDir}`)]]
+      return [[Sequelize.literal(`${Database.adapter.safeTextToDouble(Database.adapter.column('series->bookSeries', 'sequence'))} ${nullDir}`)]]
     } else if (sortBy === 'progress') {
       return [[Sequelize.literal(`mediaProgresses.updatedAt ${dir} NULLS LAST`)]]
     } else if (sortBy === 'progress.createdAt') {
@@ -311,7 +311,7 @@ module.exports = {
    */
   async getCollapseSeriesBooksToExclude(bookFindOptions, seriesWhere, replacements = {}) {
     const allSeries = await Database.seriesModel.findAll({
-      attributes: ['id', 'name', [Sequelize.literal('(SELECT count(*) FROM bookSeries bs WHERE bs.seriesId = series.id)'), 'numBooks']],
+      attributes: ['id', 'name', Sequelize.literal(`(SELECT count(*) FROM bookSeries bs WHERE bs.seriesId = series.id) AS ${Database.adapter.aliasAs('numBooks')}`)],
       distinct: true,
       subQuery: false,
       replacements,
@@ -327,7 +327,7 @@ module.exports = {
           required: true
         }
       ],
-      order: [Sequelize.literal('CAST(`books.bookSeries.sequence` AS FLOAT) ASC NULLS LAST')]
+      order: [Sequelize.literal(`${Database.adapter.safeTextToDouble(Database.adapter.column('books->bookSeries', 'sequence'))} ASC NULLS LAST`)]
     })
     const bookSeriesToInclude = []
     const booksToInclude = []
@@ -503,7 +503,7 @@ module.exports = {
       })
       if (sortBy !== 'sequence') {
         // Secondary sort by sequence
-        sortOrder.push([Sequelize.literal('CAST(`series.bookSeries.sequence` AS FLOAT) ASC NULLS LAST')])
+        sortOrder.push([Sequelize.literal(`${Database.adapter.safeTextToDouble(Database.adapter.column('series->bookSeries', 'sequence'))} ASC NULLS LAST`)])
       }
     } else if (filterGroup === 'issues') {
       libraryItemWhere[Sequelize.Op.or] = [
@@ -596,9 +596,9 @@ module.exports = {
       // When collapsing series and sorting by title then use the series name instead of the book title
       //  for this set an attribute "display_title" to use in sorting
       if (global.ServerSettings.sortingIgnorePrefix) {
-        bookAttributes.include.push([Sequelize.literal(`IFNULL((SELECT s.nameIgnorePrefix FROM bookSeries AS bs, series AS s WHERE bs.seriesId = s.id AND bs.bookId = book.id AND bs.id IN (${bookSeriesToInclude.map((v) => `"${v.id}"`).join(', ')})), \`libraryItem\`.\`titleIgnorePrefix\`)`), 'display_title'])
+        bookAttributes.include.push([Sequelize.literal(`COALESCE((SELECT s.nameIgnorePrefix FROM bookSeries AS bs, series AS s WHERE bs.seriesId = s.id AND bs.bookId = book.id AND bs.id IN (${bookSeriesToInclude.map((v) => Database.sequelize.escape(v.id)).join(', ')})), ${Database.adapter.column('libraryItem', 'titleIgnorePrefix')})`), 'display_title'])
       } else {
-        bookAttributes.include.push([Sequelize.literal(`IFNULL((SELECT s.name FROM bookSeries AS bs, series AS s WHERE bs.seriesId = s.id AND bs.bookId = book.id AND bs.id IN (${bookSeriesToInclude.map((v) => `"${v.id}"`).join(', ')})), \`libraryItem\`.\`title\`)`), 'display_title'])
+        bookAttributes.include.push([Sequelize.literal(`COALESCE((SELECT s.name FROM bookSeries AS bs, series AS s WHERE bs.seriesId = s.id AND bs.bookId = book.id AND bs.id IN (${bookSeriesToInclude.map((v) => Database.sequelize.escape(v.id)).join(', ')})), ${Database.adapter.column('libraryItem', 'title')})`), 'display_title'])
       }
     }
 
@@ -720,10 +720,10 @@ module.exports = {
     let booksNotFinishedQuery = `SELECT count(*) FROM bookSeries bs LEFT OUTER JOIN mediaProgresses mp ON mp.mediaItemId = bs.bookId AND mp.userId = :userId WHERE bs.seriesId = series.id AND (mp.isFinished = 0 OR mp.isFinished IS NULL)`
 
     if (library.settings.onlyShowLaterBooksInContinueSeries) {
-      const maxSequenceQuery = `(SELECT CAST(max(bs.sequence) as FLOAT) FROM bookSeries bs, mediaProgresses mp WHERE mp.mediaItemId = bs.bookId AND mp.isFinished = 1 AND mp.userId = :userId AND bs.seriesId = series.id)`
+      const maxSequenceQuery = `(SELECT ${Database.adapter.safeTextToDouble('max(bs.sequence)')} FROM bookSeries bs, mediaProgresses mp WHERE mp.mediaItemId = bs.bookId AND mp.isFinished = 1 AND mp.userId = :userId AND bs.seriesId = series.id)`
       includeAttributes.push([Sequelize.literal(`${maxSequenceQuery}`), 'maxSequence'])
 
-      booksNotFinishedQuery = booksNotFinishedQuery + ` AND CAST(bs.sequence as FLOAT) > ${maxSequenceQuery}`
+      booksNotFinishedQuery = booksNotFinishedQuery + ` AND ${Database.adapter.safeTextToDouble('bs.sequence')} > ${maxSequenceQuery}`
     }
 
     const { rows: series, count } = await Database.seriesModel.findAndCountAll({
@@ -758,7 +758,7 @@ module.exports = {
         attributes: ['bookId', 'sequence'],
         separate: true,
         subQuery: false,
-        order: [[Sequelize.literal('CAST(sequence AS FLOAT) ASC NULLS LAST')]],
+        order: [[Sequelize.literal(`${Database.adapter.safeTextToDouble('sequence')} ASC NULLS LAST`)]],
         where: {
           '$book.mediaProgresses.isFinished$': {
             [Sequelize.Op.or]: [null, 0]
@@ -871,7 +871,7 @@ module.exports = {
           model: Database.bookModel,
           where: userPermissionBookWhere.bookWhere
         },
-        order: [[Sequelize.literal('CAST(sequence AS FLOAT) ASC NULLS LAST')]],
+        order: [[Sequelize.literal(`${Database.adapter.safeTextToDouble('sequence')} ASC NULLS LAST`)]],
         limit: 1
       },
       subQuery: false,
@@ -1175,7 +1175,7 @@ module.exports = {
 
     // Search narrators
     const narratorMatches = []
-    const [narratorResults] = await Database.sequelize.query(`SELECT value, count(*) AS numBooks FROM books b, libraryItems li, json_each(b.narrators) WHERE json_valid(b.narrators) AND ${matchJsonValue} AND b.id = li.mediaId AND li.libraryId = :libraryId GROUP BY value LIMIT :limit OFFSET :offset;`, {
+    const [narratorResults] = await Database.sequelize.query(`SELECT value, count(*) AS ${Database.adapter.aliasAs('numBooks')} FROM books b, libraryItems li, ${Database.adapter.jsonArrayExpand('b.narrators')} WHERE ${Database.adapter.jsonValid('b.narrators')} AND ${matchJsonValue} AND b.id = li.mediaId AND li.libraryId = :libraryId GROUP BY value LIMIT :limit OFFSET :offset;`, {
       replacements: {
         libraryId: library.id,
         limit,
@@ -1192,7 +1192,7 @@ module.exports = {
 
     // Search tags
     const tagMatches = []
-    const [tagResults] = await Database.sequelize.query(`SELECT value, count(*) AS numItems FROM books b, libraryItems li, json_each(b.tags) WHERE json_valid(b.tags) AND ${matchJsonValue} AND b.id = li.mediaId AND li.libraryId = :libraryId GROUP BY value ORDER BY numItems DESC LIMIT :limit OFFSET :offset;`, {
+    const [tagResults] = await Database.sequelize.query(`SELECT value, count(*) AS ${Database.adapter.aliasAs('numItems')} FROM books b, libraryItems li, ${Database.adapter.jsonArrayExpand('b.tags')} WHERE ${Database.adapter.jsonValid('b.tags')} AND ${matchJsonValue} AND b.id = li.mediaId AND li.libraryId = :libraryId GROUP BY value ORDER BY ${Database.adapter.aliasAs('numItems')} DESC LIMIT :limit OFFSET :offset;`, {
       replacements: {
         libraryId: library.id,
         limit,
@@ -1209,7 +1209,7 @@ module.exports = {
 
     // Search genres
     const genreMatches = []
-    const [genreResults] = await Database.sequelize.query(`SELECT value, count(*) AS numItems FROM books b, libraryItems li, json_each(b.genres) WHERE json_valid(b.genres) AND ${matchJsonValue} AND b.id = li.mediaId AND li.libraryId = :libraryId GROUP BY value ORDER BY numItems DESC LIMIT :limit OFFSET :offset;`, {
+    const [genreResults] = await Database.sequelize.query(`SELECT value, count(*) AS ${Database.adapter.aliasAs('numItems')} FROM books b, libraryItems li, ${Database.adapter.jsonArrayExpand('b.genres')} WHERE ${Database.adapter.jsonValid('b.genres')} AND ${matchJsonValue} AND b.id = li.mediaId AND li.libraryId = :libraryId GROUP BY value ORDER BY ${Database.adapter.aliasAs('numItems')} DESC LIMIT :limit OFFSET :offset;`, {
       replacements: {
         libraryId: library.id,
         limit,
@@ -1289,7 +1289,7 @@ module.exports = {
    */
   async getGenresWithCount(libraryId) {
     const genres = []
-    const [genreResults] = await Database.sequelize.query(`SELECT value, count(*) AS numItems FROM books b, libraryItems li, json_each(b.genres) WHERE json_valid(b.genres) AND b.id = li.mediaId AND li.libraryId = :libraryId GROUP BY value ORDER BY numItems DESC;`, {
+    const [genreResults] = await Database.sequelize.query(`SELECT value, count(*) AS ${Database.adapter.aliasAs('numItems')} FROM books b, libraryItems li, ${Database.adapter.jsonArrayExpand('b.genres')} WHERE ${Database.adapter.jsonValid('b.genres')} AND b.id = li.mediaId AND li.libraryId = :libraryId GROUP BY value ORDER BY ${Database.adapter.aliasAs('numItems')} DESC;`, {
       replacements: {
         libraryId
       },
@@ -1310,7 +1310,7 @@ module.exports = {
    * @returns {Promise<{ totalSize:number, totalDuration:number, numAudioFiles:number, totalItems:number}>}
    */
   async getBookLibraryStats(libraryId) {
-    const [statResults] = await Database.sequelize.query(`SELECT SUM(li.size) AS totalSize, SUM(b.duration) AS totalDuration, SUM(json_array_length(b.audioFiles)) AS numAudioFiles, COUNT(*) AS totalItems FROM libraryItems li, books b WHERE b.id = li.mediaId AND li.libraryId = :libraryId;`, {
+    const [statResults] = await Database.sequelize.query(`SELECT SUM(li.size) AS ${Database.adapter.aliasAs('totalSize')}, SUM(b.duration) AS ${Database.adapter.aliasAs('totalDuration')}, SUM(${Database.adapter.jsonArrayLength('b.audioFiles')}) AS ${Database.adapter.aliasAs('numAudioFiles')}, COUNT(*) AS ${Database.adapter.aliasAs('totalItems')} FROM libraryItems li, books b WHERE b.id = li.mediaId AND li.libraryId = :libraryId;`, {
       replacements: {
         libraryId
       }

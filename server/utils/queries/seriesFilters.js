@@ -3,6 +3,15 @@ const Logger = require('../../Logger')
 const Database = require('../../Database')
 const libraryItemsBookFilters = require('./libraryItemsBookFilters')
 
+/**
+ * Subquery attribute with an output alias. The alias is quoted by the adapter so Postgres keeps its case.
+ * @param {string} expression
+ * @param {string} alias
+ */
+function aliasedLiteral(expression, alias) {
+  return Sequelize.literal(`${expression} AS ${Database.adapter.aliasAs(alias)}`)
+}
+
 module.exports = {
   decode(text) {
     try {
@@ -65,7 +74,7 @@ module.exports = {
     // TODO: Simplify and break-out
     let attrQuery = null
     if (['genres', 'tags', 'narrators'].includes(filterGroup)) {
-      attrQuery = `SELECT count(*) FROM books b, bookSeries bs WHERE bs.seriesId = series.id AND bs.bookId = b.id AND (SELECT count(*) FROM json_each(b.${filterGroup}) WHERE json_valid(b.${filterGroup}) AND json_each.value = :filterValue) > 0`
+      attrQuery = `SELECT count(*) FROM books b, bookSeries bs WHERE bs.seriesId = series.id AND bs.bookId = b.id AND ${Database.adapter.jsonArrayContainsValue(`b.${filterGroup}`, 'filterValue')} > 0`
       userPermissionBookWhere.replacements.filterValue = filterValue
     } else if (filterGroup === 'authors') {
       attrQuery = 'SELECT count(*) FROM books b, bookSeries bs, bookAuthors ba WHERE bs.seriesId = series.id AND bs.bookId = b.id AND ba.bookId = b.id AND ba.authorId = :filterValue'
@@ -104,9 +113,9 @@ module.exports = {
       }
       if (!user.permissions?.accessAllTags && user.permissions?.itemTagsSelected?.length) {
         if (user.permissions.selectedTagsNotAccessible) {
-          attrQuery += ' AND (SELECT count(*) FROM json_each(tags) WHERE json_valid(tags) AND json_each.value IN (:userTagsSelected)) = 0'
+          attrQuery += ` AND ${Database.adapter.jsonArrayContainsAny('tags', 'userTagsSelected')} = 0`
         } else {
-          attrQuery += ' AND (SELECT count(*) FROM json_each(tags) WHERE json_valid(tags) AND json_each.value IN (:userTagsSelected)) > 0'
+          attrQuery += ` AND ${Database.adapter.jsonArrayContainsAny('tags', 'userTagsSelected')} > 0`
         }
       }
     }
@@ -127,25 +136,25 @@ module.exports = {
     // Handle sort order
     const dir = sortDesc ? 'DESC' : 'ASC'
     if (sortBy === 'numBooks') {
-      seriesAttributes.include.push([Sequelize.literal('(SELECT count(*) FROM bookSeries bs WHERE bs.seriesId = series.id)'), 'numBooks'])
-      order.push(['numBooks', dir])
+      seriesAttributes.include.push(aliasedLiteral('(SELECT count(*) FROM bookSeries bs WHERE bs.seriesId = series.id)', 'numBooks'))
+      order.push([Sequelize.literal(Database.adapter.aliasAs('numBooks')), dir])
     } else if (sortBy === 'addedAt') {
       order.push(['createdAt', dir])
     } else if (sortBy === 'name') {
       if (global.ServerSettings.sortingIgnorePrefix) {
-        order.push([Sequelize.literal('nameIgnorePrefix COLLATE NOCASE'), dir])
+        order.push([Sequelize.literal(Database.adapter.noCaseOrder('nameIgnorePrefix')), dir])
       } else {
-        order.push([Sequelize.literal('`series`.`name` COLLATE NOCASE'), dir])
+        order.push([Sequelize.literal(Database.adapter.noCaseOrder(Database.adapter.column('series', 'name'))), dir])
       }
     } else if (sortBy === 'totalDuration') {
-      seriesAttributes.include.push([Sequelize.literal('(SELECT SUM(b.duration) FROM books b, bookSeries bs WHERE bs.seriesId = series.id AND b.id = bs.bookId)'), 'totalDuration'])
-      order.push(['totalDuration', dir])
+      seriesAttributes.include.push(aliasedLiteral('(SELECT SUM(b.duration) FROM books b, bookSeries bs WHERE bs.seriesId = series.id AND b.id = bs.bookId)', 'totalDuration'))
+      order.push([Sequelize.literal(Database.adapter.aliasAs('totalDuration')), dir])
     } else if (sortBy === 'lastBookAdded') {
-      seriesAttributes.include.push([Sequelize.literal('(SELECT MAX(b.createdAt) FROM books b, bookSeries bs WHERE bs.seriesId = series.id AND b.id = bs.bookId)'), 'mostRecentBookAdded'])
-      order.push(['mostRecentBookAdded', dir])
+      seriesAttributes.include.push(aliasedLiteral('(SELECT MAX(b.createdAt) FROM books b, bookSeries bs WHERE bs.seriesId = series.id AND b.id = bs.bookId)', 'mostRecentBookAdded'))
+      order.push([Sequelize.literal(Database.adapter.aliasAs('mostRecentBookAdded')), dir])
     } else if (sortBy === 'lastBookUpdated') {
-      seriesAttributes.include.push([Sequelize.literal('(SELECT MAX(b.updatedAt) FROM books b, bookSeries bs WHERE bs.seriesId = series.id AND b.id = bs.bookId)'), 'mostRecentBookUpdated'])
-      order.push(['mostRecentBookUpdated', dir])
+      seriesAttributes.include.push(aliasedLiteral('(SELECT MAX(b.updatedAt) FROM books b, bookSeries bs WHERE bs.seriesId = series.id AND b.id = bs.bookId)', 'mostRecentBookUpdated'))
+      order.push([Sequelize.literal(Database.adapter.aliasAs('mostRecentBookUpdated')), dir])
     } else if (sortBy === 'random') {
       order.push(Database.sequelize.random())
     }
@@ -185,11 +194,23 @@ module.exports = {
 
     // Map series to old series
     const allOldSeries = []
+
+    // Postgres does not keep an unknown SELECT alias on the model instance, so read the totals with a grouped query.
+    let totalDurationBySeriesId = new Map()
+    if (sortBy === 'totalDuration' && series.length && series.some((s) => s.dataValues.totalDuration === undefined)) {
+      const totals = await Database.sequelize.query(
+        `SELECT bs.seriesId AS ${Database.adapter.aliasAs('seriesId')}, SUM(b.duration) AS ${Database.adapter.aliasAs('totalDuration')} FROM books b, bookSeries bs WHERE bs.seriesId IN (:seriesIds) AND b.id = bs.bookId GROUP BY bs.seriesId`,
+        { replacements: { seriesIds: series.map((s) => s.id) }, type: Sequelize.QueryTypes.SELECT }
+      )
+      totalDurationBySeriesId = new Map(totals.map((row) => [row.seriesId, row.totalDuration]))
+    }
+
     for (const s of series) {
       const oldSeries = s.toOldJSON()
 
-      if (s.dataValues.totalDuration) {
-        oldSeries.totalDuration = s.dataValues.totalDuration
+      const totalDuration = s.dataValues.totalDuration ?? totalDurationBySeriesId.get(s.id)
+      if (totalDuration) {
+        oldSeries.totalDuration = totalDuration
       }
 
       if (s.feeds?.length) {

@@ -5,6 +5,7 @@ const parseNameString = require('../utils/parsers/parseNameString')
 const htmlSanitizer = require('../utils/htmlSanitizer')
 const libraryItemsBookFilters = require('../utils/queries/libraryItemsBookFilters')
 const SocketAuthority = require('../SocketAuthority')
+const { dialectFor } = require('../utils/dialectAdapter')
 
 /**
  * @typedef EBookFileObject
@@ -173,10 +174,7 @@ class Book extends Model {
         indexes: [
           {
             fields: [
-              {
-                name: 'title',
-                collate: 'NOCASE'
-              }
+              dialectFor(sequelize).indexField('title')
             ]
           },
           // {
