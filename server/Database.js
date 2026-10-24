@@ -200,8 +200,9 @@ class Database {
     }
 
     if (this.dialect === 'postgres') {
-      // Refuses to start while a restore holds the database lock.
-      await this.restoreLock.join(process.env.DATABASE_URL)
+      // Refuses to start while a restore holds the database lock. DATABASE_LOCK_URL is for a direct or session-pooled
+      // connection when DATABASE_URL goes through a transaction-mode pooler.
+      await this.restoreLock.join(process.env.DATABASE_LOCK_URL || process.env.DATABASE_URL)
     }
 
     if (!(await this.connect())) {
