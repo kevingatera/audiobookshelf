@@ -112,7 +112,7 @@ class PlaybackSession extends Model {
       }),
       this.findAll({
         where: { userId, ...nonEmpty('dayOfWeek') },
-        attributes: ['dayOfWeek', [seconds, 'seconds']],
+        attributes: [['dayOfWeek', 'dayofweek'], [seconds, 'seconds']],
         group: ['dayOfWeek'],
         raw: true,
         hooks: false
@@ -126,7 +126,7 @@ class PlaybackSession extends Model {
       today: 0
     }
     for (const row of dayRows) stats.days[row.date] = Number(row.seconds) || 0
-    for (const row of dayOfWeekRows) stats.dayOfWeek[row.dayOfWeek] = Number(row.seconds) || 0
+    for (const row of dayOfWeekRows) stats.dayOfWeek[row.dayofweek] = Number(row.seconds) || 0
     stats.today = stats.days[today] || 0
 
     if (includeItems) {
@@ -146,34 +146,31 @@ class PlaybackSession extends Model {
    * @returns {Promise<Object<string, object>>}
    */
   static async getListeningItemTotals(userId) {
-    const qi = this.sequelize.getQueryInterface()
-    const quote = (name) => qi.quoteIdentifier(name)
-    const extraData = quote('extraData')
-    const libraryItemId =
-      this.sequelize.getDialect() === 'postgres'
-        ? `${extraData}->>'libraryItemId'`
-        : `json_extract(${extraData}, '$.libraryItemId')`
+    // No quoted identifiers: the production Postgres schema is lower case, so quoted camelCase names do not match it.
+    // Output aliases are lower case too, so SQLite and Postgres return the same row keys.
+    const libraryItemId = this.sequelize.getDialect() === 'postgres' ? `extraData->>'libraryItemId'` : `json_extract(extraData, '$.libraryItemId')`
 
     const rows = await this.sequelize.query(
-      `SELECT ${quote('libraryItemId')}, ${quote('seconds')}, ${quote('mediaMetadata')}, ${quote('lastUpdate')} FROM (
-        SELECT ${libraryItemId} AS ${quote('libraryItemId')},
-          ${quote('mediaMetadata')},
-          ${quote('updatedAt')} AS ${quote('lastUpdate')},
-          SUM(${quote('timeListening')}) OVER (PARTITION BY ${libraryItemId}) AS ${quote('seconds')},
-          ROW_NUMBER() OVER (PARTITION BY ${libraryItemId} ORDER BY ${quote('updatedAt')} DESC) AS ${quote('rn')}
-        FROM ${quote(this.getTableName())}
-        WHERE ${quote('userId')} = :userId AND ${libraryItemId} IS NOT NULL
-      ) AS ${quote('ranked')} WHERE ${quote('rn')} = 1`,
+      `SELECT libraryitemid, seconds, mediametadata, lastupdate FROM (
+        SELECT ${libraryItemId} AS libraryitemid,
+          mediaMetadata AS mediametadata,
+          updatedAt AS lastupdate,
+          SUM(timeListening) OVER (PARTITION BY ${libraryItemId}) AS seconds,
+          ROW_NUMBER() OVER (PARTITION BY ${libraryItemId} ORDER BY updatedAt DESC) AS rn
+        FROM ${this.getTableName()}
+        WHERE userId = :userId AND ${libraryItemId} IS NOT NULL
+      ) AS ranked WHERE rn = 1`,
       { replacements: { userId }, type: QueryTypes.SELECT }
     )
 
+    // Normalize the lower-case aliases back to the camelCase shape the API returns.
     const items = {}
     for (const row of rows) {
-      items[row.libraryItemId] = {
-        id: row.libraryItemId,
+      items[row.libraryitemid] = {
+        id: row.libraryitemid,
         timeListening: Number(row.seconds) || 0,
-        mediaMetadata: parseJsonColumn(row.mediaMetadata),
-        lastUpdate: new Date(row.lastUpdate).valueOf()
+        mediaMetadata: parseJsonColumn(row.mediametadata),
+        lastUpdate: new Date(row.lastupdate).valueOf()
       }
     }
     return items

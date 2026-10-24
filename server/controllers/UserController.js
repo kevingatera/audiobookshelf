@@ -435,18 +435,23 @@ class UserController {
     const itemsPerPage = toNumber(req.query.itemsPerPage, 10) || 10
     const page = toNumber(req.query.page, 0)
 
-    const payload = await this.getUserListeningSessionsPageHelper(req.params.id, page, itemsPerPage)
-    // Map user to sessions to match the format of the sessions endpoint
-    payload.sessions = payload.sessions.map((session) => {
-      return {
-        ...session,
-        user: {
-          id: req.reqUser.id,
-          username: req.reqUser.username
+    try {
+      const payload = await this.getUserListeningSessionsPageHelper(req.params.id, page, itemsPerPage)
+      // Map user to sessions to match the format of the sessions endpoint
+      payload.sessions = payload.sessions.map((session) => {
+        return {
+          ...session,
+          user: {
+            id: req.reqUser.id,
+            username: req.reqUser.username
+          }
         }
-      }
-    })
-    res.json(payload)
+      })
+      res.json(payload)
+    } catch (error) {
+      Logger.error(`[UserController] Failed to load listening sessions for user ${req.params.id}`, error)
+      res.sendStatus(500)
+    }
   }
 
   /**

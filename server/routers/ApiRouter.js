@@ -533,19 +533,24 @@ class ApiRouter {
    * @param {number} itemsPerPage
    */
   async getUserListeningSessionsPageHelper(userId, page, itemsPerPage) {
+    // Bound the paging values before they reach SQL: a negative LIMIT fails on Postgres.
+    const requestedSize = Math.trunc(Number(itemsPerPage))
+    const pageSize = requestedSize >= 1 ? Math.min(requestedSize, 100) : 10
+    const requestedPage = Math.trunc(Number(page))
+    const pageIndex = requestedPage >= 0 ? requestedPage : 0
     const where = { userId }
     const [total, sessions] = await Promise.all([
       Database.countPlaybackSessions(where),
       Database.getPlaybackSessions(where, {
-        limit: itemsPerPage,
-        offset: page * itemsPerPage
+        limit: pageSize,
+        offset: pageIndex * pageSize
       })
     ])
     return {
       total,
-      numPages: Math.ceil(total / itemsPerPage),
-      page,
-      itemsPerPage,
+      numPages: Math.ceil(total / pageSize),
+      page: pageIndex,
+      itemsPerPage: pageSize,
       sessions
     }
   }

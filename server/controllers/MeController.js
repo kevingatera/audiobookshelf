@@ -158,8 +158,13 @@ class MeController {
     const itemsPerPage = toNumber(req.query.itemsPerPage, 10) || 10
     const page = toNumber(req.query.page, 0)
 
-    const payload = await this.getUserListeningSessionsPageHelper(req.user.id, page, itemsPerPage)
-    res.json(payload)
+    try {
+      const payload = await this.getUserListeningSessionsPageHelper(req.user.id, page, itemsPerPage)
+      res.json(payload)
+    } catch (error) {
+      Logger.error(`[MeController] Failed to load listening sessions for user ${req.user.id}`, error)
+      res.sendStatus(500)
+    }
   }
 
   /**

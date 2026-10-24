@@ -491,7 +491,17 @@ describe('Listening stats and listening sessions behavior pin', () => {
 
       expect(stats.totalTime).to.equal(EXPECTED_TOTAL_TIME + 40)
       expect(stats.items).to.not.have.property('null')
-      expect(Object.keys(stats.items)).to.deep.equal([libraryItemA.id, libraryItemB.id])
+      // Grouped rows come back in no guaranteed order, so compare membership.
+      expect(Object.keys(stats.items).sort()).to.deep.equal([libraryItemA.id, libraryItemB.id].sort())
+    })
+
+    it('clamps paging values before they reach the query', async () => {
+      const low = await callListeningSessions({ user: user1, query: { itemsPerPage: '-1', page: '-3' } })
+      expect(low.itemsPerPage).to.equal(10)
+      expect(low.page).to.equal(0)
+      expect(Array.isArray(low.sessions)).to.equal(true)
+      const high = await callListeningSessions({ user: user1, query: { itemsPerPage: '1000', page: '0' } })
+      expect(high.itemsPerPage).to.equal(100)
     })
 
     it('treats a null timeListening as 0 without poisoning totals', async () => {
