@@ -113,3 +113,52 @@ describe('migrateSqliteToPostgres', function () {
     expect(await count('libraryitems')).to.equal(4)
   })
 })
+
+describe('migrateSqliteToPostgres checksums', function () {
+  const { canonicalValue, compareOrdered } = require('../../../server/scripts/migrateSqliteToPostgres')
+  const columns = { id: { key: 'UUID' }, audioFiles: { key: 'JSON' } }
+
+  // Rows are plain objects ordered by id, served in batches the way the importer pages them.
+  function pager(rows, size) {
+    return async (after) => rows.filter((r) => after === null || r.id > after).slice(0, size)
+  }
+  const rowsWith = (nestedSize) => [1, 2, 3, 4, 5].map((n) => ({ id: `id-${n}`, audioFiles: JSON.stringify([{ ino: `${n}`, metadata: { filename: 'a.m4b', size: n === 3 ? nestedSize : n } }]) }))
+
+  it('keeps nested JSON fields in the checksum and ignores nested key order', function () {
+    const a = canonicalValue('[{"metadata":{"size":1,"filename":"a"}}]', 'JSON')
+    const reordered = canonicalValue('[{"metadata":{"filename":"a","size":1}}]', 'JSON')
+    const corrupted = canonicalValue('[{"metadata":{"size":2,"filename":"a"}}]', 'JSON')
+    expect(reordered).to.equal(a)
+    expect(corrupted).to.not.equal(a)
+  })
+
+  it('compares rows across batch boundaries', async function () {
+    const rows = rowsWith(3)
+    const result = await compareOrdered({ label: 't', key: 'id', columns, fetchSource: pager(rows, 2), fetchTarget: pager(rows, 2) })
+    expect(result.rows).to.equal(5)
+  })
+
+  it('rejects a nested field that differs before anything is committed', async function () {
+    const source = rowsWith(3)
+    const target = rowsWith(4)
+    let error = null
+    try {
+      await compareOrdered({ label: 't', key: 'id', columns, fetchSource: pager(source, 2), fetchTarget: pager(target, 2) })
+    } catch (e) {
+      error = e
+    }
+    expect(error?.message).to.match(/Checksum mismatch for t at id id-3/)
+  })
+
+  it('rejects a missing target row', async function () {
+    const source = rowsWith(3)
+    const target = source.filter((r) => r.id !== 'id-2')
+    let error = null
+    try {
+      await compareOrdered({ label: 't', key: 'id', columns, fetchSource: pager(source, 2), fetchTarget: pager(target, 2) })
+    } catch (e) {
+      error = e
+    }
+    expect(error?.message).to.match(/Row mismatch for t/)
+  })
+})
