@@ -1,11 +1,8 @@
 const { expect } = require('chai')
 const fs = require('fs')
-const os = require('os')
 const path = require('path')
 const { Sequelize } = require('sequelize')
-const archiver = require('../../../server/libs/archiver')
-const StreamZip = require('../../../server/libs/nodeStreamZip')
-const { bootPostgres, seedLibrary } = require('../database/pgFixtures')
+const { bootPostgres, seedLibrary, writeArchive, fakeRes, removeTempDirs } = require('../database/pgFixtures')
 
 // Round trip against a real Postgres. Needs ABS_TEST_POSTGRES_URL and PG_BIN_DIR. The client major must match the server (see the PR notes).
 describe('BackupManager postgres round trip', function () {
@@ -15,7 +12,6 @@ describe('BackupManager postgres round trip', function () {
   let BackupManager
   let manager
   let seeded
-  const workDirs = []
 
   const bookCount = async () => Database.bookModel.count()
 
@@ -29,7 +25,7 @@ describe('BackupManager postgres round trip', function () {
   })
 
   after(async function () {
-    for (const dir of workDirs) fs.rmSync(dir, { recursive: true, force: true })
+    removeTempDirs()
     if (restore) await restore()
   })
 
@@ -70,49 +66,6 @@ describe('BackupManager postgres round trip', function () {
     expect(await bookCount()).to.equal(before)
     fs.unlinkSync(broken)
   })
-
-  // Writes a real zip with the app's archiver, the same way the backup job does: the dump and two metadata folders.
-  async function writeArchive(dumpPath, { withDump = true } = {}) {
-    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'abs-pg-archive-'))
-    workDirs.push(workDir)
-    const itemsDir = path.join(workDir, 'items')
-    const authorsDir = path.join(workDir, 'authors')
-    fs.mkdirSync(itemsDir)
-    fs.mkdirSync(authorsDir)
-    fs.writeFileSync(path.join(itemsDir, 'probe.json'), '{"probe":true}')
-    fs.writeFileSync(path.join(authorsDir, 'probe.json'), '{"probe":true}')
-    const file = path.join(workDir, 'backup.audiobookshelf')
-    await new Promise((resolve, reject) => {
-      const output = fs.createWriteStream(file)
-      const archive = archiver('zip', { zlib: { level: 1 } })
-      output.on('close', resolve)
-      archive.on('error', reject)
-      archive.pipe(output)
-      if (withDump) archive.file(dumpPath, { name: 'absdatabase.postgres.dump' })
-      archive.directory(itemsDir, 'metadata-items')
-      archive.directory(authorsDir, 'metadata-authors')
-      archive.finalize()
-    })
-    const zip = new StreamZip.async({ file })
-    return { zip, entries: await zip.entries() }
-  }
-
-  function fakeRes() {
-    return {
-      code: null,
-      status(code) {
-        this.code = code
-        return this
-      },
-      send() {
-        return this
-      },
-      sendStatus(code) {
-        this.code = code
-        return this
-      }
-    }
-  }
 
   it('reports an archive without a dump before the database is touched', async function () {
     const before = await bookCount()

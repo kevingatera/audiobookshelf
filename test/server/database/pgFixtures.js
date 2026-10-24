@@ -4,6 +4,8 @@ const { randomUUID } = require('crypto')
 const path = require('path')
 const os = require('os')
 const fs = require('fs')
+const archiver = require('../../../server/libs/archiver')
+const StreamZip = require('../../../server/libs/nodeStreamZip')
 
 const POSTGRES_URL = process.env.ABS_TEST_POSTGRES_URL
 
@@ -13,9 +15,12 @@ function postgresUrl() {
 
 /**
  * Points the app at the test database and boots Database.init(force) the way the server does.
- * Returns a restore function that puts the environment and globals back.
+ * Returns a restore function that puts the environment and globals back and gives up the restore lock session.
+ * @param {object} Database the server/Database singleton
+ * @param {boolean} [force=true]
+ * @param {string} [url=POSTGRES_URL] DATABASE_URL for the app, e.g. one with an ordinary role
  */
-async function bootPostgres(Database, force = true) {
+async function bootPostgres(Database, force = true, url = POSTGRES_URL) {
   const saved = {
     DB_DIALECT: process.env.DB_DIALECT,
     DATABASE_URL: process.env.DATABASE_URL,
@@ -24,18 +29,75 @@ async function bootPostgres(Database, force = true) {
     ServerSettings: global.ServerSettings
   }
   process.env.DB_DIALECT = 'postgres'
-  process.env.DATABASE_URL = POSTGRES_URL
+  process.env.DATABASE_URL = url
   global.ConfigPath = fs.mkdtempSync(path.join(os.tmpdir(), 'abs-pg-test-'))
   global.MetadataPath = global.ConfigPath
   global.ServerSettings = { sortingIgnorePrefix: false }
   await Database.init(force)
   return async () => {
     if (Database.sequelize) await Database.disconnect()
+    if (Database.restoreLock) await Database.restoreLock.leave()
     process.env.DB_DIALECT = saved.DB_DIALECT
     process.env.DATABASE_URL = saved.DATABASE_URL
     global.ConfigPath = saved.ConfigPath
     global.MetadataPath = saved.MetadataPath
     global.ServerSettings = saved.ServerSettings
+  }
+}
+
+const tempDirs = []
+
+/** Removes every directory that writeArchive() created. Call from an after() hook. */
+function removeTempDirs() {
+  while (tempDirs.length) fs.rmSync(tempDirs.pop(), { recursive: true, force: true })
+}
+
+/**
+ * Writes a real zip with the app's archiver, the same way the backup job does: the dump and two metadata folders.
+ * @param {string} dumpPath
+ * @param {{withDump?: boolean}} [options]
+ * @returns {Promise<{zip: object, entries: object}>}
+ */
+async function writeArchive(dumpPath, { withDump = true } = {}) {
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'abs-pg-archive-'))
+  tempDirs.push(workDir)
+  const itemsDir = path.join(workDir, 'items')
+  const authorsDir = path.join(workDir, 'authors')
+  fs.mkdirSync(itemsDir)
+  fs.mkdirSync(authorsDir)
+  fs.writeFileSync(path.join(itemsDir, 'probe.json'), '{"probe":true}')
+  fs.writeFileSync(path.join(authorsDir, 'probe.json'), '{"probe":true}')
+  const file = path.join(workDir, 'backup.audiobookshelf')
+  await new Promise((resolve, reject) => {
+    const output = fs.createWriteStream(file)
+    const archive = archiver('zip', { zlib: { level: 1 } })
+    output.on('close', resolve)
+    archive.on('error', reject)
+    archive.pipe(output)
+    if (withDump) archive.file(dumpPath, { name: 'absdatabase.postgres.dump' })
+    archive.directory(itemsDir, 'metadata-items')
+    archive.directory(authorsDir, 'metadata-authors')
+    archive.finalize()
+  })
+  const zip = new StreamZip.async({ file })
+  return { zip, entries: await zip.entries() }
+}
+
+/** Minimal express-like response for calling request handlers directly. */
+function fakeRes() {
+  return {
+    code: null,
+    status(code) {
+      this.code = code
+      return this
+    },
+    send() {
+      return this
+    },
+    sendStatus(code) {
+      this.code = code
+      return this
+    }
   }
 }
 
@@ -74,4 +136,4 @@ async function seedLibrary(Database) {
 
 const user = { id: 'u1', permissions: { accessAllTags: true }, canAccessExplicitContent: true, type: 'admin', extraData: {} }
 
-module.exports = { postgresUrl, bootPostgres, seedLibrary, user }
+module.exports = { postgresUrl, bootPostgres, seedLibrary, user, writeArchive, fakeRes, removeTempDirs }
