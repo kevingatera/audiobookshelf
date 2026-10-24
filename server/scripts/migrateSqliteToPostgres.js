@@ -89,20 +89,61 @@ function canonicalValue(value, key) {
   }
   if (key === 'JSON' || key === 'JSONB') {
     const parsed = typeof value === 'string' ? JSON.parse(value) : value
-    return JSON.stringify(parsed, Object.keys(parsed || {}).sort())
+    return JSON.stringify(canonicalJson(parsed))
   }
   if (typeof value === 'number' || typeof value === 'bigint') return Number(value)
   return String(value)
 }
 
-/** One canonical line per row. */
-function canonicalLines(rows, columns) {
-  const names = Object.keys(columns).sort()
-  return rows.map((row) => JSON.stringify(names.map((name) => canonicalValue(row[name], columns[name].key)))).sort()
+/** Canonical JSON: object keys sorted at every depth. Array order is kept, because it is data. */
+function canonicalJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalJson)
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map((k) => [k, canonicalJson(value[k])]))
+  return value
 }
 
-function digest(rows, columns) {
-  return crypto.createHash('sha256').update(canonicalLines(rows, columns).join('\n')).digest('hex')
+/** One canonical line for a row: its values in column-name order. */
+function canonicalRow(row, names, columns) {
+  return JSON.stringify(names.map((name) => canonicalValue(row[name], columns[name].key)))
+}
+
+async function* orderedRows(fetchBatch, key) {
+  let after = null
+  for (;;) {
+    const batch = await fetchBatch(after)
+    if (!batch.length) return
+    for (const row of batch) yield row
+    after = batch[batch.length - 1][key]
+  }
+}
+
+/**
+ * Compares two row sources that are both ordered by their primary key. Each side holds one batch at a time, so memory does not
+ * grow with the table. Returns the row count and a sha256 over the canonical rows in id order.
+ * fetchSource(afterKey) and fetchTarget(afterKey) return the batch after afterKey, or the first batch for null.
+ */
+async function compareOrdered({ label, key, columns, fetchSource, fetchTarget }) {
+  const names = Object.keys(columns).sort()
+  const hash = crypto.createHash('sha256')
+  const source = orderedRows(fetchSource, key)
+  const target = orderedRows(fetchTarget, key)
+  let a = await source.next()
+  let b = await target.next()
+  let count = 0
+  while (!a.done || !b.done) {
+    if (a.done || b.done) throw new Error(`Row count mismatch for ${label}: ${a.done ? 'target' : 'source'} has extra rows after ${count}`)
+    const sourceId = String(a.value[key])
+    const targetId = String(b.value[key])
+    if (sourceId !== targetId) throw new Error(`Row mismatch for ${label} after ${count} rows: source id ${sourceId}, target id ${targetId}`)
+    const sourceLine = canonicalRow(a.value, names, columns)
+    const targetLine = canonicalRow(b.value, names, columns)
+    if (sourceLine !== targetLine) throw new Error(`Checksum mismatch for ${label} at id ${sourceId}:\n  source ${sourceLine}\n  target ${targetLine}`)
+    hash.update(`${targetLine}\n`)
+    count++
+    a = await source.next()
+    b = await target.next()
+  }
+  return { rows: count, checksum: hash.digest('hex') }
 }
 
 async function migrate({ sourcePath, databaseUrl, dryRun = false, replace = false }) {
@@ -194,25 +235,34 @@ async function migrate({ sourcePath, databaseUrl, dryRun = false, replace = fals
         report.tables[table] = { copied: offset }
       }
 
-      // Validate before commit: counts and canonical checksums of every table.
+      // Validate before commit: row counts and canonical checksums, streamed in id order inside this transaction.
       for (const model of order) {
         const table = model.getTableName().tableName || model.getTableName()
         const cols = modelColumns(model)
-        const sourceRows = await all(source, `SELECT * FROM \`${table}\` ORDER BY rowid`)
+        const pkDefs = Object.entries(model.rawAttributes).filter(([, def]) => def.primaryKey)
+        if (pkDefs.length !== 1) throw new Error(`Cannot validate ${table}: expected one primary key, found ${pkDefs.length}`)
+        const [pkAttr, pkDef] = pkDefs[0]
+        const key = pkDef.field || pkAttr
         // Postgres folds unquoted output names to lower case. Quote each alias so the keys match the source rows.
-        const selectList = Object.keys(cols).map((c) => `${columnSql(c)} AS ${Database.adapter.aliasAs(c)}`).join(', ')
-        const targetRows = await sequelize.query(`SELECT ${selectList} FROM ${table}`, { type: 'SELECT', transaction })
-        const sourceSubset = sourceRows.map((r) => Object.fromEntries(Object.keys(cols).map((c) => [c, r[c]])))
-        if (sourceSubset.length !== targetRows.length) throw new Error(`Row count mismatch for ${table}: source ${sourceSubset.length}, target ${targetRows.length}`)
-        const sourceDigest = digest(sourceSubset, cols)
-        const targetDigest = digest(targetRows, cols)
-        if (sourceDigest !== targetDigest) {
-          const sourceLines = canonicalLines(sourceSubset, cols)
-          const targetLines = canonicalLines(targetRows, cols)
-          const i = sourceLines.findIndex((line, idx) => line !== targetLines[idx])
-          throw new Error(`Checksum mismatch for ${table} at sorted row ${i}:\n  source ${sourceLines[i]}\n  target ${targetLines[i]}`)
-        }
-        report.tables[table] = { rows: targetRows.length, checksum: targetDigest.slice(0, 16) }
+        const selectList = Object.keys(cols)
+          .map((c) => `${columnSql(c)} AS ${Database.adapter.aliasAs(c)}`)
+          .join(', ')
+        // Both sides page by id in the same order. "C" collation matches SQLite's binary order for any id type.
+        const { rows, checksum } = await compareOrdered({
+          label: table,
+          key,
+          columns: cols,
+          fetchSource: (after) =>
+            after === null
+              ? all(source, `SELECT * FROM \`${table}\` ORDER BY \`${key}\` LIMIT ${BATCH_SIZE}`)
+              : all(source, `SELECT * FROM \`${table}\` WHERE \`${key}\` > ? ORDER BY \`${key}\` LIMIT ${BATCH_SIZE}`, [after]),
+          fetchTarget: (after) =>
+            sequelize.query(
+              `SELECT ${selectList} FROM ${table}${after === null ? '' : ` WHERE ${key}::text COLLATE "C" > :after`} ORDER BY ${key}::text COLLATE "C" LIMIT ${BATCH_SIZE}`,
+              { type: 'SELECT', transaction, replacements: { after } }
+            )
+        })
+        report.tables[table] = { rows, checksum: checksum.slice(0, 16) }
       }
     } finally {
       await all(source, 'COMMIT').catch(() => {})
@@ -243,7 +293,7 @@ async function migrate({ sourcePath, databaseUrl, dryRun = false, replace = fals
   return report
 }
 
-module.exports = { migrate, dependencyOrder, canonicalValue }
+module.exports = { migrate, dependencyOrder, canonicalValue, canonicalJson, canonicalRow, compareOrdered }
 
 if (require.main === module) {
   const args = process.argv.slice(2)
