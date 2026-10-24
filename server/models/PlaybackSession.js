@@ -1,6 +1,17 @@
-const { DataTypes, Model } = require('sequelize')
+const { DataTypes, Model, Op, QueryTypes, fn, col } = require('sequelize')
 
+const date = require('../libs/dateAndTime')
 const oldPlaybackSession = require('../objects/PlaybackSession')
+
+// SQLite returns JSON columns as text from raw queries; Postgres returns objects.
+function parseJsonColumn(value) {
+  if (typeof value !== 'string') return value ?? null
+  try {
+    return JSON.parse(value)
+  } catch (error) {
+    return null
+  }
+}
 
 class PlaybackSession extends Model {
   constructor(values, options) {
@@ -52,9 +63,16 @@ class PlaybackSession extends Model {
     this.createdAt
   }
 
-  static async getOldPlaybackSessions(where = null) {
+  /**
+   * @param {object|null} where
+   * @param {{ limit?: number, offset?: number, order?: Array }} [options]
+   */
+  static async getOldPlaybackSessions(where = null, options = {}) {
     const playbackSessions = await this.findAll({
       where,
+      limit: options.limit ?? undefined,
+      offset: options.offset ?? undefined,
+      order: options.order ?? [['updatedAt', 'DESC']],
       include: [
         {
           model: this.sequelize.models.device
@@ -62,6 +80,100 @@ class PlaybackSession extends Model {
       ]
     })
     return playbackSessions.map((session) => this.getOldPlaybackSession(session))
+  }
+
+  static countWithWhere(where = null) {
+    return this.count({ where })
+  }
+
+  /**
+   * Listening totals computed in the database. Only the per-item and recent
+   * session lists are optional, so minified stats never load session rows.
+   *
+   * @param {string} userId
+   * @param {{ includeItems?: boolean, includeRecentSessions?: boolean }} [options]
+   * @returns {Promise<object>}
+   */
+  static async getListeningStats(userId, options = {}) {
+    const includeItems = options.includeItems !== false
+    const includeRecentSessions = options.includeRecentSessions !== false
+    const today = date.format(new Date(), 'YYYY-MM-DD')
+    const seconds = fn('SUM', col('timeListening'))
+    const nonEmpty = (field) => ({ [field]: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] } })
+
+    const [totals, dayRows, dayOfWeekRows] = await Promise.all([
+      this.findOne({ where: { userId }, attributes: [[seconds, 'seconds']], raw: true, hooks: false }),
+      this.findAll({
+        where: { userId, timeListening: { [Op.gt]: 0 }, ...nonEmpty('date') },
+        attributes: ['date', [seconds, 'seconds']],
+        group: ['date'],
+        raw: true,
+        hooks: false
+      }),
+      this.findAll({
+        where: { userId, ...nonEmpty('dayOfWeek') },
+        attributes: [['dayOfWeek', 'dayofweek'], [seconds, 'seconds']],
+        group: ['dayOfWeek'],
+        raw: true,
+        hooks: false
+      })
+    ])
+
+    const stats = {
+      totalTime: Number(totals?.seconds) || 0,
+      days: {},
+      dayOfWeek: {},
+      today: 0
+    }
+    for (const row of dayRows) stats.days[row.date] = Number(row.seconds) || 0
+    for (const row of dayOfWeekRows) stats.dayOfWeek[row.dayofweek] = Number(row.seconds) || 0
+    stats.today = stats.days[today] || 0
+
+    if (includeItems) {
+      stats.items = await this.getListeningItemTotals(userId)
+    }
+    if (includeRecentSessions) {
+      stats.recentSessions = await this.getOldPlaybackSessions({ userId }, { limit: 10 })
+    }
+    return stats
+  }
+
+  /**
+   * One row per library item: summed seconds plus the metadata and time of its
+   * most recent session. Sessions without a library item id are left out.
+   *
+   * @param {string} userId
+   * @returns {Promise<Object<string, object>>}
+   */
+  static async getListeningItemTotals(userId) {
+    // No quoted identifiers: the production Postgres schema is lower case, so quoted camelCase names do not match it.
+    // Output aliases are lower case too, so SQLite and Postgres return the same row keys.
+    const libraryItemId = this.sequelize.getDialect() === 'postgres' ? `extraData->>'libraryItemId'` : `json_extract(extraData, '$.libraryItemId')`
+
+    const rows = await this.sequelize.query(
+      `SELECT libraryitemid, seconds, mediametadata, lastupdate FROM (
+        SELECT ${libraryItemId} AS libraryitemid,
+          mediaMetadata AS mediametadata,
+          updatedAt AS lastupdate,
+          SUM(timeListening) OVER (PARTITION BY ${libraryItemId}) AS seconds,
+          ROW_NUMBER() OVER (PARTITION BY ${libraryItemId} ORDER BY updatedAt DESC) AS rn
+        FROM ${this.getTableName()}
+        WHERE userId = :userId AND ${libraryItemId} IS NOT NULL
+      ) AS ranked WHERE rn = 1`,
+      { replacements: { userId }, type: QueryTypes.SELECT }
+    )
+
+    // Normalize the lower-case aliases back to the camelCase shape the API returns.
+    const items = {}
+    for (const row of rows) {
+      items[row.libraryitemid] = {
+        id: row.libraryitemid,
+        timeListening: Number(row.seconds) || 0,
+        mediaMetadata: parseJsonColumn(row.mediametadata),
+        lastUpdate: new Date(row.lastupdate).valueOf()
+      }
+    }
+    return items
   }
 
   static async getById(sessionId) {

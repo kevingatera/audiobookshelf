@@ -4,7 +4,7 @@ const Logger = require('../Logger')
 const SocketAuthority = require('../SocketAuthority')
 const Database = require('../Database')
 
-const { toNumber } = require('../utils/index')
+const { toNumber, isMinifiedRequest } = require('../utils/index')
 
 /**
  * @typedef RequestUserObject
@@ -432,32 +432,27 @@ class UserController {
    * @param {Response} res
    */
   async getListeningSessions(req, res) {
-    var listeningSessions = await this.getUserListeningSessionsHelper(req.params.id)
-
     const itemsPerPage = toNumber(req.query.itemsPerPage, 10) || 10
     const page = toNumber(req.query.page, 0)
 
-    const start = page * itemsPerPage
-    // Map user to sessions to match the format of the sessions endpoint
-    const sessions = listeningSessions.slice(start, start + itemsPerPage).map((session) => {
-      return {
-        ...session,
-        user: {
-          id: req.reqUser.id,
-          username: req.reqUser.username
+    try {
+      const payload = await this.getUserListeningSessionsPageHelper(req.params.id, page, itemsPerPage)
+      // Map user to sessions to match the format of the sessions endpoint
+      payload.sessions = payload.sessions.map((session) => {
+        return {
+          ...session,
+          user: {
+            id: req.reqUser.id,
+            username: req.reqUser.username
+          }
         }
-      }
-    })
-
-    const payload = {
-      total: listeningSessions.length,
-      numPages: Math.ceil(listeningSessions.length / itemsPerPage),
-      page,
-      itemsPerPage,
-      sessions
+      })
+      res.json(payload)
+    } catch (error) {
+      if (error.status === 400) return res.sendStatus(400)
+      Logger.error(`[UserController] Failed to load listening sessions for user ${req.params.id}`, error)
+      res.sendStatus(500)
     }
-
-    res.json(payload)
   }
 
   /**
@@ -469,7 +464,11 @@ class UserController {
    * @param {Response} res
    */
   async getListeningStats(req, res) {
-    var listeningStats = await this.getUserListeningStatsHelpers(req.params.id)
+    const minified = isMinifiedRequest(req)
+    const listeningStats = await this.getUserListeningStatsHelpers(req.params.id, {
+      includeItems: !minified,
+      includeRecentSessions: !minified
+    })
     res.json(listeningStats)
   }
 

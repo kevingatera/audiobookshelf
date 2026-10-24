@@ -522,60 +522,50 @@ class ApiRouter {
     }
   }
 
-  async getUserListeningSessionsHelper(userId) {
-    const userSessions = await Database.getPlaybackSessions({ userId })
-    return userSessions.sort((a, b) => b.updatedAt - a.updatedAt)
-  }
-
   async getUserItemListeningSessionsHelper(userId, mediaItemId) {
     const userSessions = await Database.getPlaybackSessions({ userId, mediaItemId })
     return userSessions.sort((a, b) => b.updatedAt - a.updatedAt)
   }
 
-  async getUserListeningStatsHelpers(userId) {
-    const today = date.format(new Date(), 'YYYY-MM-DD')
-
-    const listeningSessions = await this.getUserListeningSessionsHelper(userId)
-    const listeningStats = {
-      totalTime: 0,
-      items: {},
-      days: {},
-      dayOfWeek: {},
-      today: 0,
-      recentSessions: listeningSessions.slice(0, 10)
+  /**
+   * @param {string} userId
+   * @param {number} page
+   * @param {number} itemsPerPage
+   */
+  async getUserListeningSessionsPageHelper(userId, page, itemsPerPage) {
+    // Bound the paging values before they reach SQL: a negative LIMIT fails on Postgres,
+    // and OFFSET Infinity or an offset past 2^53 is rejected by Postgres too.
+    const requestedSize = Math.trunc(Number(itemsPerPage))
+    const pageSize = requestedSize >= 1 ? Math.min(requestedSize, 100) : 10
+    const requestedPage = Math.trunc(Number(page))
+    const pageIndex = requestedPage >= 0 ? requestedPage : 0
+    const offset = pageIndex * pageSize
+    if (!Number.isSafeInteger(requestedPage) || !Number.isSafeInteger(offset)) {
+      throw Object.assign(new Error('Listening session page is out of range'), { status: 400 })
     }
-    listeningSessions.forEach((s) => {
-      let sessionTimeListening = s.timeListening
-      if (typeof sessionTimeListening == 'string') {
-        sessionTimeListening = Number(sessionTimeListening)
-      }
+    const where = { userId }
+    const [total, sessions] = await Promise.all([
+      Database.countPlaybackSessions(where),
+      Database.getPlaybackSessions(where, {
+        limit: pageSize,
+        offset: pageIndex * pageSize
+      })
+    ])
+    return {
+      total,
+      numPages: Math.ceil(total / pageSize),
+      page: pageIndex,
+      itemsPerPage: pageSize,
+      sessions
+    }
+  }
 
-      if (s.dayOfWeek) {
-        if (!listeningStats.dayOfWeek[s.dayOfWeek]) listeningStats.dayOfWeek[s.dayOfWeek] = 0
-        listeningStats.dayOfWeek[s.dayOfWeek] += sessionTimeListening
-      }
-      if (s.date && sessionTimeListening > 0) {
-        if (!listeningStats.days[s.date]) listeningStats.days[s.date] = 0
-        listeningStats.days[s.date] += sessionTimeListening
-
-        if (s.date === today) {
-          listeningStats.today += sessionTimeListening
-        }
-      }
-      if (!listeningStats.items[s.libraryItemId]) {
-        listeningStats.items[s.libraryItemId] = {
-          id: s.libraryItemId,
-          timeListening: sessionTimeListening,
-          mediaMetadata: s.mediaMetadata,
-          lastUpdate: s.lastUpdate
-        }
-      } else {
-        listeningStats.items[s.libraryItemId].timeListening += sessionTimeListening
-      }
-
-      listeningStats.totalTime += sessionTimeListening
-    })
-    return listeningStats
+  /**
+   * @param {string} userId
+   * @param {{ includeItems?: boolean, includeRecentSessions?: boolean }} [options]
+   */
+  async getUserListeningStatsHelpers(userId, options = {}) {
+    return Database.getListeningStats(userId, options)
   }
 }
 module.exports = ApiRouter
