@@ -727,7 +727,8 @@ module.exports = {
 
     if (library.settings.onlyShowLaterBooksInContinueSeries) {
       const maxSequenceQuery = `(SELECT ${Database.adapter.safeTextToDouble('max(bs.sequence)')} FROM bookSeries bs, mediaProgresses mp WHERE mp.mediaItemId = bs.bookId AND mp.isFinished = ${Database.adapter.bool(true)} AND mp.userId = :userId AND bs.seriesId = series.id)`
-      includeAttributes.push([Sequelize.literal(`${maxSequenceQuery}`), 'maxSequence'])
+      // Lower-case alias on purpose: Postgres folds unquoted camelCase, and Sequelize drops quoted camelCase keys from rows.
+      includeAttributes.push([Sequelize.literal(maxSequenceQuery), 'max_sequence'])
 
       booksNotFinishedQuery = booksNotFinishedQuery + ` AND ${Database.adapter.safeTextToDouble('bs.sequence')} > ${maxSequenceQuery}`
     }
@@ -809,7 +810,7 @@ module.exports = {
         // if the library setting is toggled, only show later entries in series, otherwise skip
         if (library.settings.onlyShowLaterBooksInContinueSeries) {
           bookIndex = s.bookSeries.findIndex(function (b) {
-            return parseFloat(b.dataValues.sequence) > s.dataValues.maxSequence
+            return parseFloat(b.dataValues.sequence) > s.dataValues.max_sequence
           })
           if (bookIndex === -1) {
             // no later books than maxSequence

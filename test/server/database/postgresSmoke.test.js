@@ -131,6 +131,20 @@ describe('Postgres query smoke', function () {
     }
   })
 
+  it('returns the next unread book in Continue Series when only later books are shown', async function () {
+    const { libraryId } = await seed()
+    const M = Database.models
+    const user = await Database.userModel.create({ id: randomUUID(), username: `cs-${randomUUID()}`, pash: null, type: 'user', isActive: true, extraData: {}, permissions: { accessAllTags: true } })
+    const series = await M.series.findOne({ where: { libraryId } })
+    const firstInSeries = await M.bookSeries.findOne({ where: { seriesId: series.id, sequence: '1' } })
+    await M.mediaProgress.create({ id: randomUUID(), userId: user.id, mediaItemId: firstInSeries.bookId, mediaItemType: 'book', duration: 60, currentTime: 60, isFinished: true, finishedAt: new Date(), extraData: {} })
+    const library = { id: libraryId, mediaType: 'book', settings: { hideSingleBookSeries: false, onlyShowLaterBooksInContinueSeries: true, collapseSeries: false } }
+    const result = await require('../../../server/utils/queries/libraryFilters').getLibraryItemsContinueSeries(library, user, [], 10)
+    expect(result.count).to.equal(1)
+    expect(result.libraryItems).to.have.length(1)
+    expect(result.libraryItems[0].media.metadata.series.sequence).to.equal('2')
+  })
+
   it('totals book and podcast sizes and year stats', async function () {
     await seed()
     const adminStats = require('../../../server/utils/queries/adminStats')
