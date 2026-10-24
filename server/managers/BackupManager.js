@@ -3,7 +3,7 @@ const Path = require('path')
 const Logger = require('../Logger')
 const SocketAuthority = require('../SocketAuthority')
 const Database = require('../Database')
-const { dialectFor } = require('../utils/dialectAdapter')
+const { dialectFor, POSTGRES_APPLICATION_NAME } = require('../utils/dialectAdapter')
 const { dumpArgs, restoreArgs, runPostgresTool } = require('../utils/postgresTools')
 
 const cron = require('../libs/nodeCron')
@@ -305,11 +305,24 @@ class BackupManager {
     const dumpPath = Path.join(stagingPath, 'absdatabase.postgres.dump')
     let disconnected = false
     try {
+      // The restore replaces the data under other connections, so refuse while any other client is attached.
+      const otherClients = await this.countOtherPostgresClients()
+      if (otherClients > 0) {
+        Logger.warn(`[BackupManager] Refusing postgres restore while ${otherClients} other database connection(s) are open`)
+        return res.status(409).send('Another Audiobookshelf instance is connected to this database. Stop it, then restore again.')
+      }
+
       await fs.remove(stagingPath)
       await fs.ensureDir(stagingPath)
+      const itemsStagingPath = Path.join(stagingPath, 'metadata-items')
+      const authorsStagingPath = Path.join(stagingPath, 'metadata-authors')
+      await fs.ensureDir(itemsStagingPath)
+      await fs.ensureDir(authorsStagingPath)
       await zip.extract('absdatabase.postgres.dump', dumpPath)
-      await zip.extract('metadata-items/', Path.join(stagingPath, 'metadata-items'))
-      await zip.extract('metadata-authors/', Path.join(stagingPath, 'metadata-authors'))
+      await zip.extract('metadata-items/', itemsStagingPath)
+      await zip.extract('metadata-authors/', authorsStagingPath)
+      // node-stream-zip resolves without writing when the entry is missing, so check the file itself.
+      if (!(await fs.pathExists(dumpPath))) throw new Error('Backup archive has no database dump')
 
       await Database.disconnect()
       disconnected = true
@@ -498,6 +511,20 @@ class BackupManager {
     const dumpFilePath = Path.join(global.ConfigPath, `absdatabase.${backup.id}.postgres.dump`)
     await runPostgresTool({ name: 'pg_dump', args: dumpArgs(process.env.DATABASE_URL, dumpFilePath), databaseUrl: process.env.DATABASE_URL })
     return dumpFilePath
+  }
+
+  /**
+   * Counts client connections to this database that were not opened by this process.
+   * @returns {Promise<number>}
+   */
+  async countOtherPostgresClients() {
+    const [row] = await Database.sequelize.query(
+      `SELECT count(*) AS count FROM pg_stat_activity
+       WHERE datname = current_database() AND backend_type = 'client backend' AND pid <> pg_backend_pid()
+         AND application_name IS DISTINCT FROM :ownName`,
+      { replacements: { ownName: POSTGRES_APPLICATION_NAME }, type: 'SELECT' }
+    )
+    return Number(row.count)
   }
 
   /**

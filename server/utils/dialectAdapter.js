@@ -1,4 +1,8 @@
+const { randomUUID } = require('crypto')
 const { Sequelize } = require('sequelize')
+
+// Tags this process's Postgres connections. A restore counts client connections that do not carry this name.
+const POSTGRES_APPLICATION_NAME = `audiobookshelf-${randomUUID()}`
 
 /**
  * The only module that knows how SQLite and Postgres differ.
@@ -404,9 +408,9 @@ function resolveDialect(env = process.env) {
 function createSequelize({ dialect, storage, databaseUrl, logging = false, benchmark = false }) {
   if (dialect === 'postgres') {
     if (!databaseUrl) throw new Error('DATABASE_URL is required for the postgres dialect')
-    return new Sequelize(databaseUrl, { dialect: 'postgres', logging, benchmark, quoteIdentifiers: false })
+    return new Sequelize(databaseUrl, { dialect: 'postgres', logging, benchmark, quoteIdentifiers: false, dialectOptions: { application_name: POSTGRES_APPLICATION_NAME } })
   }
   return new Sequelize({ dialect: 'sqlite', storage, logging, benchmark, transactionType: 'IMMEDIATE' })
 }
 
-module.exports = { dialectFor, resolveDialect, createSequelize, SqliteAdapter, PostgresAdapter }
+module.exports = { dialectFor, resolveDialect, createSequelize, SqliteAdapter, PostgresAdapter, POSTGRES_APPLICATION_NAME }
