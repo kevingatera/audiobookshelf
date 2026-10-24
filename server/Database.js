@@ -11,6 +11,7 @@ const Auth = require('./Auth')
 const MigrationManager = require('./managers/MigrationManager')
 const { dialectFor, resolveDialect, createSequelize } = require('./utils/dialectAdapter')
 const PostgresRepairManager = require('./managers/PostgresRepairManager')
+const { RestoreLock } = require('./utils/postgresRestoreLock')
 
 class Database {
   constructor() {
@@ -34,6 +35,9 @@ class Database {
 
     this.supportsUnaccent = false
     this.supportsUnicodeFoldings = false
+
+    /** Shared with every instance on the same Postgres database; a restore takes it exclusively. */
+    this.restoreLock = new RestoreLock()
   }
 
   get models() {
@@ -195,6 +199,12 @@ class Database {
       this.isNew = !!force
     }
 
+    if (this.dialect === 'postgres') {
+      // Refuses to start while a restore holds the database lock. DATABASE_LOCK_URL is for a direct or session-pooled
+      // connection when DATABASE_URL goes through a transaction-mode pooler.
+      await this.restoreLock.join(process.env.DATABASE_LOCK_URL || process.env.DATABASE_URL)
+    }
+
     if (!(await this.connect())) {
       throw new Error('Database connection failed')
     }
@@ -259,6 +269,10 @@ class Database {
 
     // Helper function
     this.sequelize.uppercaseFirst = (str) => (str ? `${str[0].toUpperCase()}${str.substr(1)}` : '')
+    if (this.dialect === 'postgres') {
+      // Every new connection needs the shared lock, so an instance that lost it opens nothing until it rejoins.
+      this.sequelize.addHook('beforeConnect', () => this.restoreLock.assertMember())
+    }
 
     try {
       await this.sequelize.authenticate()

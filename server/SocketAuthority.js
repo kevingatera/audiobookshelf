@@ -4,6 +4,7 @@ const Database = require('./Database')
 const TokenManager = require('./auth/TokenManager')
 const CoverSearchManager = require('./managers/CoverSearchManager')
 const { LogLevel } = require('./utils/constants')
+const restoreMaintenance = require('./utils/restoreMaintenance')
 
 /**
  * @typedef SocketClient
@@ -174,7 +175,10 @@ class SocketAuthority {
     }
 
     this.socketIoServers.forEach((io) => {
+      // Refuse connections and events with an error while a Postgres restore runs on this instance
+      io.use(restoreMaintenance.socketMiddleware)
       io.on('connection', (socket) => {
+        socket.use(restoreMaintenance.packetMiddleware)
         this.clients[socket.id] = {
           id: socket.id,
           socket,

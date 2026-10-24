@@ -49,6 +49,22 @@ RUN case "$TARGETPLATFORM" in \
 
 RUN npm ci --omit=dev
 
+### STAGE 2b: PostgreSQL 14 client. Alpine ships only newer majors, and backups must restore on the production server (14). ###
+FROM node:24-alpine AS pg-client
+
+ARG PG_VERSION=14.23
+ARG PG_SHA256=cc7216822b546330e29c2f91e123c8734a4c41795082145bb962aa712e8c94a5
+RUN apk add --no-cache --virtual .pg-build build-base linux-headers openssl-dev zlib-dev perl bison flex \
+  && wget -q -O /tmp/postgresql.tar.bz2 "https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2" \
+  && echo "${PG_SHA256}  /tmp/postgresql.tar.bz2" | sha256sum -c - \
+  && tar -xjf /tmp/postgresql.tar.bz2 -C /tmp \
+  && cd /tmp/postgresql-${PG_VERSION} \
+  && ./configure --prefix=/opt/pg14 --with-openssl --without-readline --without-icu --without-ldap --without-gssapi --without-libxml --without-zstd --without-lz4 \
+  && make -j"$(nproc)" world-bin \
+  && make install-world-bin \
+  && cd / && rm -rf /tmp/postgresql-${PG_VERSION} /tmp/postgresql.tar.bz2 \
+  && apk del .pg-build
+
 ### STAGE 3: Create minimal runtime image ###
 FROM node:24-alpine
 
@@ -59,6 +75,8 @@ ARG NUSQLITE3_PATH
 RUN apk add --no-cache --update \
   tzdata \
   ffmpeg \
+  libssl3 \
+  zlib \
   tini
 
 WORKDIR /app
@@ -67,11 +85,13 @@ WORKDIR /app
 COPY --from=build-client /client/dist /app/client/dist
 COPY --from=build-server /server /app
 COPY --from=build-server ${NUSQLITE3_PATH} ${NUSQLITE3_PATH}
+COPY --from=pg-client /opt/pg14 /opt/pg14
 
 EXPOSE 80
 
 ENV PORT=80
 ENV NODE_ENV=production
+ENV PG_BIN_DIR=/opt/pg14/bin
 ENV CONFIG_PATH="/config"
 ENV METADATA_PATH="/metadata"
 ENV SOURCE="docker"

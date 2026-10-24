@@ -15,6 +15,7 @@ const is = require('./libs/requestIp/isJs')
 const fileUtils = require('./utils/fileUtils')
 const { toNumber } = require('./utils/index')
 const { getRequestOrigin } = require('./utils/requestUtils')
+const restoreMaintenance = require('./utils/restoreMaintenance')
 const Logger = require('./Logger')
 
 const Auth = require('./Auth')
@@ -258,6 +259,9 @@ class Server {
     await this.init()
 
     const app = express()
+
+    // Answers 503 while a Postgres restore runs on this instance
+    app.use(restoreMaintenance.middleware)
 
     app.use((req, res, next) => {
       if (!global.ServerSettings.allowIframe) {
