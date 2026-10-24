@@ -10,6 +10,7 @@ const archiver = require('../../../server/libs/archiver')
 const BackupManager = require('../../../server/managers/BackupManager')
 const Backup = require('../../../server/objects/Backup')
 const Database = require('../../../server/Database')
+const NotificationManager = require('../../../server/managers/NotificationManager')
 
 const serverVersion = require('../../../package.json').version
 
@@ -112,6 +113,46 @@ describe('BackupManager', () => {
 
       expect(manager.backups).to.have.length(1)
       expect(manager.backups[0].key).to.equal('sqlite')
+    })
+  })
+
+  describe('runBackup', () => {
+    function stubBackupSteps() {
+      const captured = {}
+      sinon.stub(manager, 'backupSqliteDb').resolves(Path.join(tempDir, 'source.sqlite'))
+      sinon.stub(manager, 'backupPostgresDb').resolves(Path.join(tempDir, 'source.dump'))
+      sinon.stub(NotificationManager, 'onBackupCompleted')
+      sinon.stub(manager, 'zipBackup').callsFake(async (sourcePath, backup, entryName) => {
+        fs.writeFileSync(backup.fullPath, 'archive')
+        captured.key = backup.key
+        captured.entryName = entryName
+        return true
+      })
+      return captured
+    }
+
+    it('writes the postgres dialect into the backup key', async () => {
+      Database.sequelize = { getDialect: () => 'postgres' }
+      const captured = stubBackupSteps()
+
+      const success = await manager.runBackup()
+
+      expect(success).to.equal(true)
+      expect(captured.key).to.equal('postgres')
+      expect(captured.entryName).to.equal('absdatabase.postgres.dump')
+      expect(manager.backups[0].detailsString.split('\n')[1]).to.equal('postgres')
+    })
+
+    it('writes the sqlite dialect into the backup key', async () => {
+      Database.sequelize = { getDialect: () => 'sqlite' }
+      const captured = stubBackupSteps()
+
+      const success = await manager.runBackup()
+
+      expect(success).to.equal(true)
+      expect(captured.key).to.equal('sqlite')
+      expect(captured.entryName).to.equal('absdatabase.sqlite')
+      expect(manager.backups[0].detailsString.split('\n')[1]).to.equal('sqlite')
     })
   })
 })

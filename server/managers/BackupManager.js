@@ -490,13 +490,13 @@ class BackupManager {
     }
     // Check if Metadata Path is inside Config Path (otherwise there will be an infinite loop as the archiver tries to zip itself)
     Logger.info(`[BackupManager] Running Backup`)
+    // Create the database copy: a sqlite file, or a pg_dump custom-format archive on postgres
+    const isFileDatabase = dialectFor(Database.sequelize).fileBased
     const newBackup = new Backup()
-    newBackup.setData(this.backupPath)
+    newBackup.setData(this.backupPath, isFileDatabase ? 'sqlite' : 'postgres')
 
     await fs.ensureDir(this.AuthorsMetadataPath)
 
-    // Create the database copy: a sqlite file, or a pg_dump custom-format archive on postgres
-    const isFileDatabase = dialectFor(Database.sequelize).fileBased
     const sqliteBackupPath = await (isFileDatabase ? this.backupSqliteDb(newBackup) : this.backupPostgresDb(newBackup)).catch((error) => {
       Logger.error(`[BackupManager] Failed to backup ${isFileDatabase ? 'sqlite' : 'postgres'} db`, error)
       const errorMsg = error?.message || error || 'Unknown Error'
