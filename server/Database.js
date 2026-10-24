@@ -10,6 +10,7 @@ const Auth = require('./Auth')
 
 const MigrationManager = require('./managers/MigrationManager')
 const { dialectFor, resolveDialect, createSequelize } = require('./utils/dialectAdapter')
+const PostgresRepairManager = require('./managers/PostgresRepairManager')
 
 class Database {
   constructor() {
@@ -203,6 +204,9 @@ class Database {
       this.isNew = !(await this.adapter.hasTables())
     }
 
+    // Repairs that must run before MigrationManager reads its version rows
+    await new PostgresRepairManager(this.sequelize).run('before')
+
     try {
       const migrationManager = new MigrationManager(this.sequelize, this.isNew, global.ConfigPath)
       await migrationManager.init(packageJson.version)
@@ -214,6 +218,9 @@ class Database {
 
     await this.buildModels(force)
     Logger.info(`[Database] Db initialized with models:`, Object.keys(this.sequelize.models).join(', '))
+
+    // Repairs that need the tables to exist: column types, indexes and denormalization triggers
+    await new PostgresRepairManager(this.sequelize).run('after')
 
     await this.addTriggers()
 
