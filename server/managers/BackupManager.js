@@ -423,7 +423,7 @@ class BackupManager {
           const fullFilePath = Path.join(this.backupPath, filename)
 
           let zip = null
-          let data = null
+          let backup = null
           try {
             zip = new StreamZip.async({ file: fullFilePath })
             const entries = await zip.entries()
@@ -440,16 +440,22 @@ class BackupManager {
               continue
             }
 
-            data = await zip.entryData('details')
+            const data = await zip.entryData('details')
+            const details = data.toString('utf8').split('\n')
+
+            backup = new Backup({ details, fullPath: fullFilePath })
+
+            // An archive without a database entry cannot be applied, so it is not listed.
+            if (!BackupManager.backupDialectOf(entries)) {
+              Logger.error(`[BackupManager] Unsupported database backup found "${backup.filename}" - skipping`)
+              await zip.close().catch(() => {})
+              continue
+            }
           } catch (error) {
             Logger.error(`[BackupManager] Failed to unzip backup "${fullFilePath}"`, error)
             if (zip) await zip.close().catch(() => {})
             continue
           }
-
-          const details = data.toString('utf8').split('\n')
-
-          const backup = new Backup({ details, fullPath: fullFilePath })
 
           if (!backup.serverVersion) {
             // Backups before v2

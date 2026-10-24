@@ -5,12 +5,35 @@ const os = require('os')
 const Path = require('path')
 const EventEmitter = require('events')
 const sqlite3 = require('sqlite3')
+const archiver = require('../../../server/libs/archiver')
 
 const BackupManager = require('../../../server/managers/BackupManager')
 const Backup = require('../../../server/objects/Backup')
 const Database = require('../../../server/Database')
 
 const serverVersion = require('../../../package.json').version
+
+/**
+ * Writes a backup archive the way runBackup() does: a details entry plus whatever entries the test needs.
+ * @param {string} dirPath
+ * @param {{filename: string, id: string, key: string, entryNames?: string[]}} options
+ */
+function writeArchive(dirPath, { filename, id, key, entryNames = [] }) {
+  const details = [id, key, Date.now(), serverVersion].join('\n')
+  const filePath = Path.join(dirPath, filename)
+  return new Promise((resolve, reject) => {
+    const output = fs.createWriteStream(filePath)
+    const archive = archiver('zip', { zlib: { level: 1 } })
+    output.on('close', () => resolve(filePath))
+    archive.on('error', reject)
+    archive.pipe(output)
+    for (const name of entryNames) {
+      archive.append(`contents of ${name}`, { name })
+    }
+    archive.append(details, { name: 'details' })
+    archive.finalize()
+  })
+}
 
 describe('BackupManager', () => {
   let originalSequelize
@@ -68,6 +91,27 @@ describe('BackupManager', () => {
 
       expect(error).to.be.an('error')
       expect(error.code).to.equal('SQLITE_CANTOPEN')
+    })
+  })
+
+  describe('loadBackups', () => {
+    it('skips archives with no database entry and archives with an unsupported one', async () => {
+      await writeArchive(tempDir, { filename: '2026-01-01T0000.audiobookshelf', id: '2026-01-01T0000', key: 'sqlite', entryNames: ['absdatabase.sqlite', 'metadata-items/probe.json', 'metadata-authors/probe.json'] })
+      await writeArchive(tempDir, { filename: '2026-01-02T0000.audiobookshelf', id: '2026-01-02T0000', key: 'sqlite', entryNames: ['metadata-items/probe.json'] })
+      await writeArchive(tempDir, { filename: '2026-01-03T0000.audiobookshelf', id: '2026-01-03T0000', key: 'sqlite', entryNames: ['absdatabase.mysql', 'metadata-items/probe.json'] })
+
+      await manager.loadBackups()
+
+      expect(manager.backups.map((b) => b.id)).to.deep.equal(['2026-01-01T0000'])
+    })
+
+    it('still lists an archive made with a sqlite key', async () => {
+      await writeArchive(tempDir, { filename: '2026-01-01T0000.audiobookshelf', id: '2026-01-01T0000', key: 'sqlite', entryNames: ['absdatabase.sqlite'] })
+
+      await manager.loadBackups()
+
+      expect(manager.backups).to.have.length(1)
+      expect(manager.backups[0].key).to.equal('sqlite')
     })
   })
 })
