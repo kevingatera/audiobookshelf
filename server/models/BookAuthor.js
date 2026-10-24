@@ -1,4 +1,5 @@
-const { DataTypes, Model, fn, col } = require('sequelize')
+const { DataTypes, Model, fn, col, literal } = require('sequelize')
+const { dialectFor } = require('../utils/dialectAdapter')
 
 class BookAuthor extends Model {
   constructor(values, options) {
@@ -47,7 +48,8 @@ class BookAuthor extends Model {
     if (!authorIds.length) return {}
 
     const rows = await this.findAll({
-      attributes: ['authorId', [fn('COUNT', col('id')), 'count']],
+      // Quote the alias: Postgres folds unquoted names to lower case and the row key must stay authorId.
+      attributes: [literal(`authorId AS ${dialectFor(this.sequelize).aliasAs('authorId')}`), [fn('COUNT', col('id')), 'count']],
       where: {
         authorId: authorIds
       },

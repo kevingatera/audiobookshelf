@@ -5,6 +5,7 @@ const { LRUCache } = require('lru-cache')
 const Logger = require('../Logger')
 const SocketAuthority = require('../SocketAuthority')
 const { isNullOrNaN } = require('../utils')
+const { dialectFor } = require('../utils/dialectAdapter')
 const TokenManager = require('../auth/TokenManager')
 
 class UserCache {
@@ -438,7 +439,7 @@ class User extends Model {
     if (cachedUser) return cachedUser
 
     const user = await this.findOne({
-      where: sequelize.where(sequelize.literal(`extraData->>"authOpenIDSub"`), sub),
+      where: sequelize.where(sequelize.literal(dialectFor(this.sequelize).jsonPathText('extraData', 'authOpenIDSub')), sub),
       include: this.sequelize.models.mediaProgress
     })
 

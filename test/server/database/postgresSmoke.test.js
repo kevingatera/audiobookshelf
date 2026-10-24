@@ -53,7 +53,7 @@ describe('Postgres query smoke', function () {
       const bookId = randomUUID()
       const libraryItemId = randomUUID()
       const audioFile = { ino: `${i}1`, duration: 60 + i, metadata: { filename: 'a.m4b', ext: '.m4b', path: '/tmp/x', size: 1000 + i } }
-      await M.book.create({ id: bookId, title: `Book ${i}`, titleIgnorePrefix: `Book ${i}`, publishedYear: String(2000 + i), tags: ['fantasy'], genres: ['Sci-Fi'], narrators: ['Ann'], audioFiles: [audioFile], duration: 60 + i })
+      await M.book.create({ id: bookId, title: `Book ${i}`, titleIgnorePrefix: `Book ${i}`, publishedYear: String(2000 + i), tags: ['fantasy'], genres: ['Sci-Fi'], narrators: ['Ann'], audioFiles: [audioFile], duration: 60 + i, explicit: false })
       await M.libraryItem.create({ id: libraryItemId, ino: `li${i}`, path: `/tmp/books/b${i}`, relPath: `b${i}`, mediaId: bookId, mediaType: 'book', libraryId, libraryFolderId: folderId, title: `Book ${i}`, titleIgnorePrefix: `Book ${i}`, authorNamesFirstLast: 'Jane Doe', authorNamesLastFirst: 'Doe, Jane', size: 1000 + i, isFile: false, isMissing: false, isInvalid: false, libraryFiles: [] })
       await M.bookAuthor.create({ bookId, authorId: author.id })
       await M.bookSeries.create({ bookId, seriesId: series.id, sequence: String(i + 1) })
@@ -109,5 +109,77 @@ describe('Postgres query smoke', function () {
     expect(books.book.length).to.be.greaterThan(0)
     const pods = await require('../../../server/utils/queries/libraryItemsPodcastFilters').search(user, { id: libraryId, mediaType: 'podcast', settings: {} }, 'pod', 10, 0)
     expect(pods.podcast.length).to.be.greaterThan(0)
+  })
+
+  it('runs personalized shelves and series filters for admin and restricted users', async function () {
+    const { libraryId } = await seed()
+    const library = { id: libraryId, mediaType: 'book', settings: { hideSingleBookSeries: false, onlyShowLaterBooksInContinueSeries: false, collapseSeries: false } }
+    const admin = { id: randomUUID(), type: 'admin', permissions: { accessAllTags: true }, canAccessExplicitContent: true, extraData: {} }
+    const restricted = { id: randomUUID(), type: 'user', permissions: { accessAllTags: true }, canAccessExplicitContent: false, extraData: {} }
+    const libraryFilters = require('../../../server/utils/queries/libraryFilters')
+    const seriesFilters = require('../../../server/utils/queries/seriesFilters')
+    const notFinished = `progress.${Buffer.from('not-finished').toString('base64')}`
+    for (const user of [admin, restricted]) {
+      await libraryFilters.getLibraryItemsToDiscover(library, user, [], 10)
+      await libraryFilters.getMediaItemsInProgress(library, user, [], 10)
+      await libraryFilters.getLibraryItemsContinueSeries(library, user, [], 10)
+      await libraryFilters.getMediaFinished(library, user, [], 10)
+      const notStarted = await seriesFilters.getFilteredSeries(library, user, notFinished, 'name', false, [], 10, 0)
+      expect(notStarted.series.length).to.be.greaterThan(0)
+      const all = await seriesFilters.getFilteredSeries(library, user, 'all', 'name', false, [], 10, 0)
+      expect(all.series.length).to.be.greaterThan(0)
+    }
+  })
+
+  it('totals book and podcast sizes and year stats', async function () {
+    await seed()
+    const adminStats = require('../../../server/utils/queries/adminStats')
+    const sizes = await adminStats.getTotalSize()
+    expect(sizes.books.numItems).to.be.at.least(3)
+    expect(sizes.books.totalSize).to.be.greaterThan(0)
+    expect(sizes.podcasts.numItems).to.be.at.least(1)
+    expect(sizes.podcasts.totalSize).to.be.greaterThan(0)
+    const stats = await adminStats.getStatsForYear(new Date().getFullYear())
+    expect(stats.numBooksAdded).to.be.at.least(3)
+    expect(stats.numBooks).to.be.at.least(3)
+    expect(stats.totalBooksSize).to.be.greaterThan(0)
+  })
+
+  it('collapses series for books that have no series without an empty IN list', async function () {
+    const { libraryId } = await seed()
+    const M = Database.models
+    const folder = await M.libraryFolder.findOne({ where: { libraryId } })
+    const bookId = randomUUID()
+    await M.book.create({ id: bookId, title: 'Solo', titleIgnorePrefix: 'Solo', tags: [], genres: ['Solo Genre'], narrators: [], audioFiles: [], duration: 10 })
+    await M.libraryItem.create({ id: randomUUID(), ino: 'solo', path: '/tmp/books/solo', relPath: 'solo', mediaId: bookId, mediaType: 'book', libraryId, libraryFolderId: folder.id, title: 'Solo', titleIgnorePrefix: 'Solo', authorNamesFirstLast: '', authorNamesLastFirst: '', size: 1, isFile: false, isMissing: false, isInvalid: false, libraryFiles: [] })
+    const user = { id: randomUUID(), permissions: { accessAllTags: true }, canAccessExplicitContent: true, type: 'admin', extraData: {} }
+    const books = require('../../../server/utils/queries/libraryItemsBookFilters')
+    for (const ignorePrefix of [false, true]) {
+      global.ServerSettings.sortingIgnorePrefix = ignorePrefix
+      const result = await books.getFilteredLibraryItems(libraryId, user, 'genres', 'Solo Genre', 'media.metadata.title', false, true, [], 10, 0)
+      expect(result.libraryItems).to.have.length(1)
+    }
+    global.ServerSettings.sortingIgnorePrefix = false
+  })
+
+  it('filters supplementary ebooks and finds users by OpenID subject', async function () {
+    const { libraryId } = await seed()
+    const admin = { id: randomUUID(), permissions: { accessAllTags: true }, canAccessExplicitContent: true, type: 'admin', extraData: {} }
+    const books = require('../../../server/utils/queries/libraryItemsBookFilters')
+    const plain = await books.getFilteredLibraryItems(libraryId, admin, 'ebooks', 'no-supplementary', 'media.metadata.title', false, false, [], 10, 0)
+    expect(plain.libraryItems).to.have.length(3)
+    const supplementary = await books.getFilteredLibraryItems(libraryId, admin, 'ebooks', 'supplementary', 'media.metadata.title', false, false, [], 10, 0)
+    expect(supplementary.libraryItems).to.have.length(0)
+    const sub = `oidc-${randomUUID()}`
+    const user = await Database.userModel.create({ id: randomUUID(), username: `oidc-${sub}`, pash: null, type: 'user', isActive: true, extraData: { authOpenIDSub: sub }, permissions: {} })
+    const found = await Database.userModel.getUserByOpenIDSub(sub)
+    expect(found?.id).to.equal(user.id)
+  })
+
+  it('counts books per author with a quoted alias', async function () {
+    const { libraryId } = await seed()
+    const author = await Database.authorModel.findOne({ where: { libraryId, name: 'Jane Doe' } })
+    const counts = await Database.bookAuthorModel.getCountsForAuthors([author.id])
+    expect(counts[author.id]).to.equal(3)
   })
 })

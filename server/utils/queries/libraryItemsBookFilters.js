@@ -435,7 +435,7 @@ module.exports = {
       separate: true
     }
 
-    const sortOrder = this.getOrder(sortBy, sortDesc, collapseseries)
+    let sortOrder = this.getOrder(sortBy, sortDesc, collapseseries)
 
     const libraryItemIncludes = []
     const bookIncludes = []
@@ -456,13 +456,10 @@ module.exports = {
       })
     } else if (filterGroup === 'ebooks' && filterValue === 'supplementary') {
       // TODO: Temp workaround for filtering supplementary ebook
-      libraryItemWhere['libraryFiles'] = {
-        [Sequelize.Op.substring]: `"isSupplementary":true`
-      }
+      // libraryFiles is json on Postgres, so match its text form
+      libraryItemWhere[Sequelize.Op.and] = [Sequelize.where(Sequelize.literal(`CAST(${Database.adapter.column('libraryItem', 'libraryFiles')} AS TEXT)`), { [Sequelize.Op.like]: '%"isSupplementary":true%' })]
     } else if (filterGroup === 'ebooks' && filterValue === 'no-supplementary') {
-      libraryItemWhere['libraryFiles'] = {
-        [Sequelize.Op.notLike]: Sequelize.literal(`\'%"isSupplementary":true%\'`)
-      }
+      libraryItemWhere[Sequelize.Op.and] = [Sequelize.where(Sequelize.literal(`CAST(${Database.adapter.column('libraryItem', 'libraryFiles')} AS TEXT)`), { [Sequelize.Op.notLike]: '%"isSupplementary":true%' })]
     } else if (filterGroup === 'missing' && filterValue === 'authors') {
       authorInclude = {
         model: Database.authorModel,
@@ -556,6 +553,7 @@ module.exports = {
 
     // Handle collapsed series
     let collapseSeriesBookSeries = []
+    let collapsedDisplayTitleSql = null
     if (collapseseries) {
       let seriesBookWhere = null
       let seriesWhere = null
@@ -595,11 +593,19 @@ module.exports = {
 
       // When collapsing series and sorting by title then use the series name instead of the book title
       //  for this set an attribute "display_title" to use in sorting
-      if (global.ServerSettings.sortingIgnorePrefix) {
-        bookAttributes.include.push([Sequelize.literal(`COALESCE((SELECT s.nameIgnorePrefix FROM bookSeries AS bs, series AS s WHERE bs.seriesId = s.id AND bs.bookId = book.id AND bs.id IN (${bookSeriesToInclude.map((v) => Database.sequelize.escape(v.id)).join(', ')})), ${Database.adapter.column('libraryItem', 'titleIgnorePrefix')})`), 'display_title'])
-      } else {
-        bookAttributes.include.push([Sequelize.literal(`COALESCE((SELECT s.name FROM bookSeries AS bs, series AS s WHERE bs.seriesId = s.id AND bs.bookId = book.id AND bs.id IN (${bookSeriesToInclude.map((v) => Database.sequelize.escape(v.id)).join(', ')})), ${Database.adapter.column('libraryItem', 'title')})`), 'display_title'])
-      }
+      // An empty list becomes NULL: "IN ()" is a syntax error on Postgres.
+      const includedBookSeriesIds = bookSeriesToInclude.map((v) => Database.sequelize.escape(v.id)).join(', ')
+      const seriesNameSubquery = (column) =>
+        includedBookSeriesIds ? `(SELECT s.${column} FROM bookSeries AS bs, series AS s WHERE bs.seriesId = s.id AND bs.bookId = book.id AND bs.id IN (${includedBookSeriesIds}))` : 'NULL'
+      const seriesNameColumn = global.ServerSettings.sortingIgnorePrefix ? 'nameIgnorePrefix' : 'name'
+      const titleColumn = global.ServerSettings.sortingIgnorePrefix ? 'titleIgnorePrefix' : 'title'
+      collapsedDisplayTitleSql = `COALESCE(${seriesNameSubquery(seriesNameColumn)}, ${Database.adapter.column('libraryItem', titleColumn)})`
+      bookAttributes.include.push([Sequelize.literal(collapsedDisplayTitleSql), 'display_title'])
+    }
+
+    // Postgres cannot reference an output alias inside LOWER(), so sort by the expression behind display_title
+    if (collapsedDisplayTitleSql && sortBy === 'media.metadata.title') {
+      sortOrder = [[Sequelize.literal(Database.adapter.noCaseOrder(collapsedDisplayTitleSql)), sortDesc ? 'DESC' : 'ASC']]
     }
 
     const findOptions = {
@@ -717,10 +723,10 @@ module.exports = {
     bookWhere.push(...userPermissionBookWhere.bookWhere)
 
     let includeAttributes = [[Sequelize.literal('(SELECT max(mp.updatedAt) FROM bookSeries bs, mediaProgresses mp WHERE mp.mediaItemId = bs.bookId AND mp.userId = :userId AND bs.seriesId = series.id)'), 'recent_progress']]
-    let booksNotFinishedQuery = `SELECT count(*) FROM bookSeries bs LEFT OUTER JOIN mediaProgresses mp ON mp.mediaItemId = bs.bookId AND mp.userId = :userId WHERE bs.seriesId = series.id AND (mp.isFinished = 0 OR mp.isFinished IS NULL)`
+    let booksNotFinishedQuery = `SELECT count(*) FROM bookSeries bs LEFT OUTER JOIN mediaProgresses mp ON mp.mediaItemId = bs.bookId AND mp.userId = :userId WHERE bs.seriesId = series.id AND (mp.isFinished = ${Database.adapter.bool(false)} OR mp.isFinished IS NULL)`
 
     if (library.settings.onlyShowLaterBooksInContinueSeries) {
-      const maxSequenceQuery = `(SELECT ${Database.adapter.safeTextToDouble('max(bs.sequence)')} FROM bookSeries bs, mediaProgresses mp WHERE mp.mediaItemId = bs.bookId AND mp.isFinished = 1 AND mp.userId = :userId AND bs.seriesId = series.id)`
+      const maxSequenceQuery = `(SELECT ${Database.adapter.safeTextToDouble('max(bs.sequence)')} FROM bookSeries bs, mediaProgresses mp WHERE mp.mediaItemId = bs.bookId AND mp.isFinished = ${Database.adapter.bool(true)} AND mp.userId = :userId AND bs.seriesId = series.id)`
       includeAttributes.push([Sequelize.literal(`${maxSequenceQuery}`), 'maxSequence'])
 
       booksNotFinishedQuery = booksNotFinishedQuery + ` AND ${Database.adapter.safeTextToDouble('bs.sequence')} > ${maxSequenceQuery}`
@@ -736,7 +742,7 @@ module.exports = {
         },
         // TODO: Simplify queries
         // Has at least 1 book finished
-        Sequelize.where(Sequelize.literal(`(SELECT count(*) FROM mediaProgresses mp, bookSeries bs WHERE bs.seriesId = series.id AND mp.mediaItemId = bs.bookId AND mp.userId = :userId AND mp.isFinished = 1)`), {
+        Sequelize.where(Sequelize.literal(`(SELECT count(*) FROM mediaProgresses mp, bookSeries bs WHERE bs.seriesId = series.id AND mp.mediaItemId = bs.bookId AND mp.userId = :userId AND mp.isFinished = ${Database.adapter.bool(true)})`), {
           [Sequelize.Op.gte]: 1
         }),
         // Has at least 1 book not finished (that has a sequence number higher than the highest already read, if library config is toggled)
@@ -744,7 +750,7 @@ module.exports = {
           [Sequelize.Op.gte]: 1
         }),
         // Has no books in progress
-        Sequelize.where(Sequelize.literal(`(SELECT count(*) FROM mediaProgresses mp, bookSeries bs WHERE mp.mediaItemId = bs.bookId AND mp.userId = :userId AND bs.seriesId = series.id AND mp.isFinished = 0 AND mp.currentTime > 0)`), 0)
+        Sequelize.where(Sequelize.literal(`(SELECT count(*) FROM mediaProgresses mp, bookSeries bs WHERE mp.mediaItemId = bs.bookId AND mp.userId = :userId AND bs.seriesId = series.id AND mp.isFinished = ${Database.adapter.bool(false)} AND mp.currentTime > 0)`), 0)
       ],
       attributes: {
         include: includeAttributes
@@ -761,7 +767,7 @@ module.exports = {
         order: [[Sequelize.literal(`${Database.adapter.safeTextToDouble('sequence')} ASC NULLS LAST`)]],
         where: {
           '$book.mediaProgresses.isFinished$': {
-            [Sequelize.Op.or]: [null, 0]
+            [Sequelize.Op.or]: [null, false]
           }
         },
         include: {
@@ -855,7 +861,7 @@ module.exports = {
         {
           libraryId
         },
-        Sequelize.where(Sequelize.literal(`(SELECT count(*) FROM bookSeries bs LEFT OUTER JOIN mediaProgresses mp ON mp.mediaItemId = bs.bookId WHERE bs.seriesId = series.id AND mp.userId = :userId AND (mp.isFinished = 1 OR mp.currentTime > 0))`), 0)
+        Sequelize.where(Sequelize.literal(`(SELECT count(*) FROM bookSeries bs LEFT OUTER JOIN mediaProgresses mp ON mp.mediaItemId = bs.bookId WHERE bs.seriesId = series.id AND mp.userId = :userId AND (mp.isFinished = ${Database.adapter.bool(true)} OR mp.currentTime > 0))`), 0)
       ],
       replacements: {
         userId: user.id,
@@ -892,7 +898,7 @@ module.exports = {
     const discoverWhere = [
       {
         '$mediaProgresses.isFinished$': {
-          [Sequelize.Op.or]: [null, 0]
+          [Sequelize.Op.or]: [null, false]
         },
         '$mediaProgresses.currentTime$': {
           [Sequelize.Op.or]: [null, 0]
