@@ -66,7 +66,7 @@ module.exports = {
         [Sequelize.Op.and]: [Sequelize.literal(matchAuthor), { libraryId }]
       },
       attributes: {
-        include: [[Sequelize.literal('(SELECT count(*) FROM bookAuthors ba WHERE ba.authorId = author.id)'), 'numBooks']]
+        include: [Sequelize.literal(`(SELECT count(*) FROM bookAuthors ba WHERE ba.authorId = author.id) AS ${Database.adapter.aliasAs('numBooks')}`)]
       },
       limit,
       offset

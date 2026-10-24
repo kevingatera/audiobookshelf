@@ -5,6 +5,7 @@ const path = require('path')
 const Module = require('module')
 const fs = require('../libs/fsExtra')
 const Logger = require('../Logger')
+const { dialectFor } = require('../utils/dialectAdapter')
 
 class MigrationManager {
   static MIGRATIONS_META_TABLE = 'migrationsMeta'
@@ -80,6 +81,13 @@ class MigrationManager {
     const versionCompare = semver.compare(this.serverVersion, this.databaseVersion)
     if (versionCompare == 0) {
       Logger.info('[MigrationManager] Database is already up to date.')
+      return
+    }
+
+    if (!dialectFor(this.sequelize).fileBased) {
+      // The released migrations are SQLite-specific. Postgres schemas come from the models.
+      Logger.info(`[MigrationManager] Skipping released migrations on ${dialectFor(this.sequelize).name}. Recording version ${this.serverVersion}.`)
+      await this.updateDatabaseVersion()
       return
     }
 
@@ -193,14 +201,14 @@ class MigrationManager {
   async fetchVersionsFromDatabase() {
     await this.checkOrCreateMigrationsMetaTable()
 
-    const [{ version }] = await this.sequelize.query("SELECT value as version FROM :migrationsMeta WHERE key = 'version'", {
-      replacements: { migrationsMeta: MigrationManager.MIGRATIONS_META_TABLE },
+    const table = MigrationManager.MIGRATIONS_META_TABLE
+    const [{ version }] = await this.sequelize.query(`SELECT value AS version FROM ${table} WHERE key = 'version'`, {
       type: Sequelize.QueryTypes.SELECT
     })
     this.databaseVersion = version
 
-    const [{ maxVersion }] = await this.sequelize.query("SELECT value as maxVersion FROM :migrationsMeta WHERE key = 'maxVersion'", {
-      replacements: { migrationsMeta: MigrationManager.MIGRATIONS_META_TABLE },
+    const maxVersionAlias = dialectFor(this.sequelize).aliasAs('maxVersion')
+    const [{ maxVersion }] = await this.sequelize.query(`SELECT value AS ${maxVersionAlias} FROM ${table} WHERE key = 'maxVersion'`, {
       type: Sequelize.QueryTypes.SELECT
     })
     this.maxVersion = maxVersion
@@ -208,12 +216,12 @@ class MigrationManager {
 
   async checkOrCreateMigrationsMetaTable() {
     const queryInterface = this.sequelize.getQueryInterface()
-    let migrationsMetaTableExists = await queryInterface.tableExists(MigrationManager.MIGRATIONS_META_TABLE)
+    const table = MigrationManager.MIGRATIONS_META_TABLE
+    let migrationsMetaTableExists = await dialectFor(this.sequelize).tableExists(table)
 
     // If the table exists, check that the `version` and `maxVersion` rows exist
     if (migrationsMetaTableExists) {
-      const [{ count }] = await this.sequelize.query("SELECT COUNT(*) as count FROM :migrationsMeta WHERE key IN ('version', 'maxVersion')", {
-        replacements: { migrationsMeta: MigrationManager.MIGRATIONS_META_TABLE },
+      const [{ count }] = await this.sequelize.query(`SELECT COUNT(*) as count FROM ${table} WHERE key IN ('version', 'maxVersion')`, {
         type: Sequelize.QueryTypes.SELECT
       })
       if (count < 2) {
@@ -241,8 +249,8 @@ class MigrationManager {
           allowNull: false
         }
       })
-      await this.sequelize.query("INSERT INTO :migrationsMeta (key, value) VALUES ('version', :version), ('maxVersion', '0.0.0')", {
-        replacements: { version: this.isDatabaseNew ? this.serverVersion : '0.0.0', migrationsMeta: MigrationManager.MIGRATIONS_META_TABLE },
+      await this.sequelize.query(`INSERT INTO ${table} (key, value) VALUES ('version', :version), ('maxVersion', '0.0.0')`, {
+        replacements: { version: this.isDatabaseNew ? this.serverVersion : '0.0.0' },
         type: Sequelize.QueryTypes.INSERT
       })
       Logger.debug(`[MigrationManager] Created migrationsMeta table: "${MigrationManager.MIGRATIONS_META_TABLE}"`)
@@ -299,8 +307,8 @@ class MigrationManager {
 
   async updateMaxVersion() {
     try {
-      await this.sequelize.query("UPDATE :migrationsMeta SET value = :maxVersion WHERE key = 'maxVersion'", {
-        replacements: { maxVersion: this.serverVersion, migrationsMeta: MigrationManager.MIGRATIONS_META_TABLE },
+      await this.sequelize.query(`UPDATE ${MigrationManager.MIGRATIONS_META_TABLE} SET value = :maxVersion WHERE key = 'maxVersion'`, {
+        replacements: { maxVersion: this.serverVersion },
         type: Sequelize.QueryTypes.UPDATE
       })
     } catch (error) {
@@ -311,8 +319,8 @@ class MigrationManager {
 
   async updateDatabaseVersion() {
     try {
-      await this.sequelize.query("UPDATE :migrationsMeta SET value = :version WHERE key = 'version'", {
-        replacements: { version: this.serverVersion, migrationsMeta: MigrationManager.MIGRATIONS_META_TABLE },
+      await this.sequelize.query(`UPDATE ${MigrationManager.MIGRATIONS_META_TABLE} SET value = :version WHERE key = 'version'`, {
+        replacements: { version: this.serverVersion },
         type: Sequelize.QueryTypes.UPDATE
       })
     } catch (error) {

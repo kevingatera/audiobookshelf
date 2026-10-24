@@ -1,6 +1,7 @@
 const { DataTypes, Model, where, fn, col, literal } = require('sequelize')
 
 const { getTitlePrefixAtEnd, getTitleIgnorePrefix } = require('../utils/index')
+const { dialectFor } = require('../utils/dialectAdapter')
 
 class Series extends Model {
   constructor(values, options) {
@@ -104,10 +105,7 @@ class Series extends Model {
         indexes: [
           {
             fields: [
-              {
-                name: 'name',
-                collate: 'NOCASE'
-              }
+              dialectFor(sequelize).indexField('name')
             ]
           },
           // {
@@ -161,7 +159,7 @@ class Series extends Model {
           }
         }
       ],
-      order: [[literal('CAST(`bookSeries.sequence` AS FLOAT) ASC NULLS LAST')]]
+      order: [[literal(`${dialectFor(this.sequelize).safeTextToDouble(dialectFor(this.sequelize).column('bookSeries', 'sequence'))} ASC NULLS LAST`)]]
     })
   }
 
