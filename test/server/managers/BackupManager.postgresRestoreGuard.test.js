@@ -229,6 +229,40 @@ describe('BackupManager postgres restore guards', function () {
     expect(await bookCount()).to.equal(before)
   })
 
+  it('refuses a second restore request without removing the dump of the first', async function () {
+    const dumpPath = await manager.backupPostgresDb({ id: token() })
+    const first = await writeArchive(dumpPath)
+    const second = await writeArchive(dumpPath)
+    fs.unlinkSync(dumpPath)
+
+    // Holds the first request inside pg_restore until the second request has been refused.
+    let reached
+    const inRestore = new Promise((resolve) => (reached = resolve))
+    let release
+    const gate = new Promise((resolve) => (release = resolve))
+    const original = manager.restorePostgresDb
+    manager.restorePostgresDb = async (file) => {
+      reached()
+      await gate
+      return original.call(manager, file)
+    }
+    const firstRes = fakeRes()
+    const secondRes = fakeRes()
+    let firstDone
+    try {
+      firstDone = manager.requestApplyPostgresBackup({ reset: async () => {} }, { filename: 'first' }, first.zip, first.entries, firstRes)
+      await inRestore
+      await manager.requestApplyPostgresBackup({ reset: async () => {} }, { filename: 'second' }, second.zip, second.entries, secondRes)
+      release()
+      await firstDone
+    } finally {
+      delete manager.restorePostgresDb
+      release()
+    }
+    expect(secondRes.code).to.equal(409)
+    expect(firstRes.code).to.equal(200)
+  })
+
   it('opens no connections without the shared lock, and rejoins it after its session drops', async function () {
     this.timeout(30000)
     const lock = Database.restoreLock

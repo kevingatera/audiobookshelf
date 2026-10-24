@@ -1,5 +1,6 @@
 const sqlite3 = require('sqlite3')
 const Path = require('path')
+const { randomUUID } = require('crypto')
 const Logger = require('../Logger')
 const SocketAuthority = require('../SocketAuthority')
 const Database = require('../Database')
@@ -302,7 +303,8 @@ class BackupManager {
   }
 
   async requestApplyPostgresBackup(apiCacheManager, backup, zip, entries, res) {
-    const stagingPath = Path.join(global.ConfigPath, 'absdatabase-restore-staging')
+    // Each request stages in its own folder, so a request that is refused cannot remove the dump of one that is running.
+    const stagingPath = Path.join(global.ConfigPath, `absdatabase-restore-${randomUUID()}`)
     const dumpPath = Path.join(stagingPath, 'absdatabase.postgres.dump')
     let result
     try {
