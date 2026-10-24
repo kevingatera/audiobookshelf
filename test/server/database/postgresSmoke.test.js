@@ -1,4 +1,5 @@
 const { expect } = require('chai')
+const { randomUUID } = require("crypto")
 const { bootPostgres, seedLibrary, user } = require('./pgFixtures')
 
 // Runs only when ABS_TEST_POSTGRES_URL points at a disposable database.

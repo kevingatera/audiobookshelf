@@ -1,4 +1,5 @@
 const { expect } = require('chai')
+const { randomUUID } = require('crypto')
 const { bootPostgres, seedLibrary } = require('./pgFixtures')
 
 // Builds the state an existing fork database has before the repairs ran, then checks the repairs fix it.
@@ -36,6 +37,9 @@ describe('Postgres schema repairs', function () {
     await sequelize.query('DROP TRIGGER IF EXISTS update_library_items_title ON books')
     await sequelize.query("UPDATE libraryItems SET title = 'stale' WHERE mediaType = 'book'")
     await sequelize.query("UPDATE libraryItems SET authorNamesFirstLast = NULL WHERE mediaType = 'book'")
+    // The deployed fork's author trigger watched only name, before lastFirst was added to it.
+    await sequelize.query('DROP TRIGGER IF EXISTS update_library_items_author_names_on_authors_update ON authors')
+    await sequelize.query('CREATE TRIGGER update_library_items_author_names_on_authors_update AFTER UPDATE OF name ON authors FOR EACH ROW EXECUTE FUNCTION update_library_items_author_names_on_authors_update_fn()')
   })
 
   after(async function () {
@@ -84,6 +88,28 @@ describe('Postgres schema repairs', function () {
     await Database.sequelize.query('DELETE FROM bookAuthors WHERE bookId = :id', { replacements: { id: seeded.bookIds[2] } })
     const [cleared] = await query('SELECT authorNamesFirstLast FROM libraryItems WHERE mediaId = :id', { id: seeded.bookIds[2] })
     expect(cleared.authornamesfirstlast).to.equal(null)
+  })
+
+  it('replaces the outdated author trigger so lastFirst-only changes reach libraryItems', async function () {
+    const [def] = await query("SELECT pg_get_triggerdef(t.oid) AS def FROM pg_trigger t WHERE NOT t.tgisinternal AND t.tgname = 'update_library_items_author_names_on_authors_update'")
+    expect(def.def.toLowerCase()).to.contain('lastfirst')
+    await Database.sequelize.query("UPDATE authors SET lastFirst = 'Smith, Janet' WHERE id = :id", { replacements: { id: seeded.authorId } })
+    const [row] = await query('SELECT authorNamesLastFirst FROM libraryItems WHERE mediaId = :id', { id: seeded.bookIds[0] })
+    expect(row.authornameslastfirst).to.equal('Smith, Janet')
+  })
+
+  it('refreshes both the old and the new book when a bookAuthor link moves', async function () {
+    const writerId = randomUUID()
+    const linkId = randomUUID()
+    await Database.sequelize.query("INSERT INTO authors (id, name, lastFirst, libraryId, createdAt, updatedAt) VALUES (:id, 'Moved Writer', 'Writer, Moved', :libraryId, now(), now())", { replacements: { id: writerId, libraryId: seeded.libraryId } })
+    await Database.sequelize.query('INSERT INTO bookAuthors (id, bookId, authorId, createdAt) VALUES (:id, :bookId, :authorId, now())', { replacements: { id: linkId, bookId: seeded.bookIds[0], authorId: writerId } })
+    const [before] = await query('SELECT authorNamesFirstLast FROM libraryItems WHERE mediaId = :id', { id: seeded.bookIds[0] })
+    expect(before.authornamesfirstlast).to.contain('Moved Writer')
+    await Database.sequelize.query('UPDATE bookAuthors SET bookId = :to WHERE id = :id', { replacements: { to: seeded.bookIds[1], id: linkId } })
+    const [from] = await query('SELECT authorNamesFirstLast FROM libraryItems WHERE mediaId = :id', { id: seeded.bookIds[0] })
+    const [to] = await query('SELECT authorNamesFirstLast FROM libraryItems WHERE mediaId = :id', { id: seeded.bookIds[1] })
+    expect(from.authornamesfirstlast).to.not.contain('Moved Writer')
+    expect(to.authornamesfirstlast).to.contain('Moved Writer')
   })
 
   it('is idempotent across repeated runs and across a normal boot', async function () {
