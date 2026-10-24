@@ -28,6 +28,8 @@ The app probes for this. It asks a second session for the lock in the other mode
 
 The probe can miss. With one transaction-mode backend it detects the pooler every time. With several backends, the probe can reach a backend that does not hold the lock, so a second instance can join. In 20 trials against a 4-backend pool, the probe refused the second instance every time. That is a measurement, not a guarantee. The only guarantee is a direct or session-pooled `DATABASE_LOCK_URL`.
 
+The pooling mode is checked at the app's first join to the lock, and again before each restore. A rejoin after a dropped lock session is not checked again: a check there needs a third connection while the app pool is open, which a role at `CONNECTION LIMIT 2` does not have. So changing the pooler's mode requires restarting the app. Until a restore runs, a changed pooler can leave the app believing it holds the lock.
+
 Not covered: a client that connects between the session check and the start of `pg_restore`, and instances from builds without this lock.
 
 ## Connection budget
