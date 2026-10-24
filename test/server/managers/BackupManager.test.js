@@ -93,6 +93,61 @@ describe('BackupManager', () => {
       expect(error).to.be.an('error')
       expect(error.code).to.equal('SQLITE_CANTOPEN')
     })
+
+    it('settles a real SQLITE_CANTOPEN open failure without waiting for close', async function () {
+      this.timeout(15000)
+      // A path inside a directory that does not exist fails the real sqlite3 open.
+      Database.dbPath = Path.join(tempDir, 'missing-directory', 'absdatabase.sqlite')
+
+      const backup = new Backup({ details: ['id', 'sqlite', Date.now(), serverVersion], fullPath: Path.join(tempDir, 'backup.audiobookshelf') })
+
+      let deadlineTimer
+      const deadline = new Promise((resolve) => {
+        deadlineTimer = setTimeout(() => resolve('deadline'), 5000)
+      })
+
+      const outcome = await Promise.race([
+        manager.backupSqliteDb(backup).then(
+          () => 'resolved',
+          (error) => error
+        ),
+        deadline
+      ])
+      clearTimeout(deadlineTimer)
+
+      expect(outcome, 'backupSqliteDb must settle within 5 s').to.not.equal('deadline')
+      expect(outcome).to.be.an('error')
+      expect(outcome.code).to.equal('SQLITE_CANTOPEN')
+      expect(fs.existsSync(Path.join(tempDir, 'missing-directory'))).to.equal(false)
+    })
+
+    it('backs up a real sqlite database and closes the handle', async () => {
+      Database.dbPath = Path.join(tempDir, 'library.sqlite')
+      await new Promise((resolve, reject) => {
+        const db = new sqlite3.Database(Database.dbPath, (error) => {
+          if (error) return reject(error)
+          db.exec("CREATE TABLE probe (id INTEGER PRIMARY KEY, name TEXT); INSERT INTO probe (name) VALUES ('round9');", (execError) => {
+            db.close(() => (execError ? reject(execError) : resolve()))
+          })
+        })
+      })
+
+      const backup = new Backup({ details: ['id', 'sqlite', Date.now(), serverVersion], fullPath: Path.join(tempDir, 'backup.audiobookshelf') })
+      const dbFilePath = await manager.backupSqliteDb(backup)
+
+      expect(dbFilePath).to.equal(Path.join(tempDir, `absdatabase.${backup.id}.sqlite`))
+      expect(fs.existsSync(dbFilePath)).to.equal(true)
+
+      const rows = await new Promise((resolve, reject) => {
+        const copy = new sqlite3.Database(dbFilePath, (error) => {
+          if (error) return reject(error)
+          copy.all('SELECT name FROM probe', (queryError, result) => {
+            copy.close(() => (queryError ? reject(queryError) : resolve(result)))
+          })
+        })
+      })
+      expect(rows).to.deep.equal([{ name: 'round9' }])
+    })
   })
 
   describe('loadBackups', () => {

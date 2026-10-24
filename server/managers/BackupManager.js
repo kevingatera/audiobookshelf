@@ -22,6 +22,8 @@ const CacheManager = require('./CacheManager')
 const NotificationManager = require('./NotificationManager')
 
 const OTHER_CLIENTS_MESSAGE = 'Another client is connected to this database. Stop it, then restore again.'
+// A close on a wedged sqlite handle never calls back, so the backup settles after this grace period.
+const SQLITE_CLOSE_DEADLINE_MS = 5000
 
 class BackupManager {
   constructor() {
@@ -588,19 +590,34 @@ class BackupManager {
       let db
       let sqliteBackup
       let settled = false
+      let opened = false
 
       const finish = (error, result) => {
         if (settled) return
         settled = true
-        if (db) {
-          db.close(() => {
-            if (error) reject(error)
-            else resolve(result)
-          })
-        } else if (error) {
-          reject(error)
-        } else {
-          resolve(result)
+
+        const settle = () => {
+          if (error) reject(error)
+          else resolve(result)
+        }
+
+        // An open that never succeeded has no usable handle, and close never calls back on one.
+        if (!db || !opened) return settle()
+
+        // An opened handle is closed best effort, and the deadline settles the backup if that
+        // close never calls back.
+        let closeSettled = false
+        const closeSettledOnce = () => {
+          if (closeSettled) return
+          closeSettled = true
+          clearTimeout(closeDeadline)
+          settle()
+        }
+        const closeDeadline = setTimeout(closeSettledOnce, SQLITE_CLOSE_DEADLINE_MS)
+        try {
+          db.close(closeSettledOnce)
+        } catch {
+          closeSettledOnce()
         }
       }
 
@@ -633,6 +650,7 @@ class BackupManager {
       // Open with a callback and keep an error listener: a failed open with neither kills the process.
       db = new sqlite3.Database(Database.dbPath, (error) => {
         if (error) return finish(error)
+        opened = true
         startBackup()
       })
       db.on('error', finish)
