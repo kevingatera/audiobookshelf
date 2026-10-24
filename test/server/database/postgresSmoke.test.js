@@ -79,7 +79,7 @@ describe('Postgres query smoke', function () {
   })
 
   it('returns the next unread book in Continue Series when only later books are shown', async function () {
-    const { libraryId } = await seed()
+    const { libraryId } = await seedLibrary(Database)
     const M = Database.models
     const user = await Database.userModel.create({ id: randomUUID(), username: `cs-${randomUUID()}`, pash: null, type: 'user', isActive: true, extraData: {}, permissions: { accessAllTags: true } })
     const series = await M.series.findOne({ where: { libraryId } })
