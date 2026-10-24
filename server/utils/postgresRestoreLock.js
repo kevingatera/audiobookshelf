@@ -39,6 +39,7 @@ class RestoreLock {
     this.databaseUrl = null
     this.stopped = false // set by leave(); only join() clears it
     this.rejoinTimer = null
+    this.verifiedUrl = null // the lock URL that passed the pooling check; rejoins on it skip the check
   }
 
   get isMember() {
@@ -76,10 +77,14 @@ class RestoreLock {
       const { rows } = await client.query('SELECT pg_try_advisory_lock_shared($1) AS ok', [RESTORE_LOCK_KEY])
       if (!rows[0].ok) throw new Error('A database restore is in progress. Start this instance after it finishes.')
       if (this.stopped) throw new Error('The database lock was left while joining')
-      // A second session must not get the lock exclusively while this one holds it shared.
-      if (await this.otherSessionGotLock('exclusive')) {
-        await client.query('SELECT pg_advisory_unlock_all()').catch(() => {})
-        throw new PooledLockError()
+      // A second session must not get the lock exclusively while this one holds it shared. The check runs once per URL,
+      // at the first join, while the app has no pool. A rejoin would otherwise open a third connection while the pool is open.
+      if (this.verifiedUrl !== this.databaseUrl) {
+        if (await this.otherSessionGotLock('exclusive')) {
+          await client.query('SELECT pg_advisory_unlock_all()').catch(() => {})
+          throw new PooledLockError()
+        }
+        this.verifiedUrl = this.databaseUrl
       }
     } catch (error) {
       await client.end().catch(() => {})
@@ -121,9 +126,8 @@ class RestoreLock {
   }
 
   /**
-   * Takes the exclusive lock. Returns false when another instance holds the shared lock. Throws PooledLockError when a
-   * second session gets the lock while this one holds it exclusively, which means the lock connection is pooled.
-   * This instance's own shared lock is on this same session, which does not block its exclusive request.
+   * Takes the exclusive lock. Returns false when another instance holds the shared lock. This instance's own shared
+   * lock is on this same session, which does not block its exclusive request. Call confirmExclusive() next.
    * @returns {Promise<boolean>}
    */
   async tryExclusive() {
@@ -131,11 +135,23 @@ class RestoreLock {
     const { rows } = await this.client.query('SELECT pg_try_advisory_lock($1) AS ok', [RESTORE_LOCK_KEY])
     if (!rows[0].ok) return false
     this.exclusive = true
-    if (await this.otherSessionGotLock('shared')) {
-      await this.releaseExclusive()
-      throw new PooledLockError()
-    }
     return true
+  }
+
+  /**
+   * Checks that the exclusive lock is not pooled. Throws PooledLockError when a second session gets the lock, which
+   * means the lock connection is pooled. Any failure releases the exclusive lock before it is thrown.
+   * The probe is a second connection, so the caller closes its own pool first. An open pool can push a role with a
+   * small CONNECTION LIMIT over the limit.
+   */
+  async confirmExclusive() {
+    this.assertExclusive()
+    try {
+      if (await this.otherSessionGotLock('shared')) throw new PooledLockError()
+    } catch (error) {
+      await this.releaseExclusive().catch(() => {})
+      throw error
+    }
   }
 
   /** Throws when the exclusive lock is not held, for example after the membership session dropped. */

@@ -350,6 +350,7 @@ class BackupManager {
 
       await Database.disconnect()
       disconnected = true
+      await lock.confirmExclusive()
 
       const others = await lock.countOtherSessions()
       if (others > 0) {

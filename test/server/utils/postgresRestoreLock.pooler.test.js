@@ -50,6 +50,7 @@ describe('restore lock through PgBouncer', function () {
     await member.join(session())
     try {
       expect(await member.tryExclusive()).to.equal(true)
+      await member.confirmExclusive()
       const second = new RestoreLock()
       let refused = null
       try {
@@ -95,6 +96,7 @@ describe('restore lock through PgBouncer', function () {
     let error = null
     try {
       await lock.tryExclusive()
+      await lock.confirmExclusive()
     } catch (caught) {
       error = caught
     } finally {

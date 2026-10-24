@@ -91,7 +91,8 @@ function fakeRes() {
       this.code = code
       return this
     },
-    send() {
+    send(message) {
+      this.message = message
       return this
     },
     sendStatus(code) {
