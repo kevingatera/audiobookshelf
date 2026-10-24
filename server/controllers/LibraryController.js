@@ -893,8 +893,14 @@ class LibraryController {
       .split(',')
       .map((v) => v.trim().toLowerCase())
       .filter((v) => !!v)
-    const shelves = await Database.libraryItemModel.getPersonalizedShelves(req.library, req.user, include, limitPerShelf)
-    res.json(shelves)
+    try {
+      const shelves = await Database.libraryItemModel.getPersonalizedShelves(req.library, req.user, include, limitPerShelf)
+      res.json(shelves)
+    } catch (error) {
+      // Express 4 does not forward async rejections, so an unhandled one would stop the server
+      Logger.error(`[LibraryController] Failed to load personalized shelves for library "${req.library.id}"`, error)
+      res.sendStatus(500)
+    }
   }
 
   /**
