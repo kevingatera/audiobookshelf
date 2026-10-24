@@ -11,6 +11,7 @@ const BackupManager = require('../../../server/managers/BackupManager')
 const Backup = require('../../../server/objects/Backup')
 const Database = require('../../../server/Database')
 const NotificationManager = require('../../../server/managers/NotificationManager')
+const date = require('../../../server/libs/dateAndTime')
 
 const serverVersion = require('../../../package.json').version
 
@@ -33,6 +34,21 @@ function writeArchive(dirPath, { filename, id, key, entryNames = [] }) {
     }
     archive.append(details, { name: 'details' })
     archive.finalize()
+  })
+}
+
+/**
+ * Creates a real SQLite database with one row, for tests that use the sqlite3 driver directly.
+ * @param {string} dbPath
+ */
+function createSqliteSource(dbPath) {
+  return new Promise((resolve, reject) => {
+    const db = new sqlite3.Database(dbPath, (error) => {
+      if (error) return reject(error)
+      db.exec("CREATE TABLE probe (id INTEGER PRIMARY KEY, name TEXT); INSERT INTO probe (name) VALUES ('r11');", (execError) => {
+        db.close(() => (execError ? reject(execError) : resolve()))
+      })
+    })
   })
 }
 
@@ -119,6 +135,44 @@ describe('BackupManager', () => {
       expect(outcome).to.be.an('error')
       expect(outcome.code).to.equal('SQLITE_CANTOPEN')
       expect(fs.existsSync(Path.join(tempDir, 'missing-directory'))).to.equal(false)
+    })
+
+    it('rejects when the destination cannot be opened, without an uncaught error', async function () {
+      this.timeout(15000)
+      Database.dbPath = Path.join(tempDir, 'library.sqlite')
+      await createSqliteSource(Database.dbPath)
+
+      const backup = new Backup({ details: ['destination-is-a-directory', 'sqlite', Date.now(), serverVersion], fullPath: Path.join(tempDir, 'backup.audiobookshelf') })
+      // A directory at the destination path makes the driver's own sqlite3_open fail with SQLITE_CANTOPEN.
+      const destinationPath = Path.join(tempDir, `absdatabase.${backup.id}.sqlite`)
+      fs.mkdirSync(destinationPath)
+
+      const uncaught = []
+      const onUncaught = (error) => uncaught.push(error)
+      process.on('uncaughtException', onUncaught)
+
+      let deadlineTimer
+      let outcome
+      try {
+        const deadline = new Promise((resolve) => {
+          deadlineTimer = setTimeout(() => resolve('deadline'), 5000)
+        })
+        outcome = await Promise.race([
+          manager.backupSqliteDb(backup).then(
+            () => 'resolved',
+            (error) => error
+          ),
+          deadline
+        ])
+      } finally {
+        clearTimeout(deadlineTimer)
+        process.removeListener('uncaughtException', onUncaught)
+      }
+
+      expect(outcome, 'backupSqliteDb must settle within 5 s').to.not.equal('deadline')
+      expect(outcome).to.be.an('error')
+      expect(outcome.code).to.equal('SQLITE_CANTOPEN')
+      expect(uncaught, 'a Backup error event must not be uncaught').to.deep.equal([])
     })
 
     it('backs up a real sqlite database and closes the handle', async () => {
@@ -208,6 +262,25 @@ describe('BackupManager', () => {
       expect(captured.key).to.equal('sqlite')
       expect(captured.entryName).to.equal('absdatabase.sqlite')
       expect(manager.backups[0].detailsString.split('\n')[1]).to.equal('sqlite')
+    })
+
+    it('notifies when the sqlite destination cannot be opened', async function () {
+      this.timeout(15000)
+      Database.sequelize = { getDialect: () => 'sqlite' }
+      Database.dbPath = Path.join(tempDir, 'library.sqlite')
+      await createSqliteSource(Database.dbPath)
+      const failed = sinon.stub(NotificationManager, 'onBackupFailed')
+
+      // runBackup() names the copy after the minute it starts in, so cover a boundary.
+      for (const offset of [0, 60 * 1000]) {
+        fs.mkdirSync(Path.join(tempDir, `absdatabase.${date.format(new Date(Date.now() + offset), 'YYYY-MM-DD[T]HHmm')}.sqlite`))
+      }
+
+      const success = await manager.runBackup()
+
+      expect(success).to.equal(false)
+      expect(failed.calledOnce).to.equal(true)
+      expect(failed.firstCall.args[0]).to.match(/unable to open database file/)
     })
   })
 })

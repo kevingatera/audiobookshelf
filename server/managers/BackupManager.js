@@ -589,12 +589,14 @@ class BackupManager {
     return new Promise((resolve, reject) => {
       let db
       let sqliteBackup
+      let pollTimer
       let settled = false
       let opened = false
 
       const finish = (error, result) => {
         if (settled) return
         settled = true
+        clearTimeout(pollTimer)
 
         const settle = () => {
           if (error) reject(error)
@@ -624,14 +626,18 @@ class BackupManager {
       const pollBackup = async () => {
         // Max time ~2 mins
         for (let i = 0; i < 240; i++) {
+          if (settled) return
           if (sqliteBackup.completed) {
             return finish(null, dbFilePath)
           } else if (sqliteBackup.failed) {
             return finish(sqliteBackup.message || 'Unknown failure reason')
           }
-          await new Promise((r) => setTimeout(r, 500))
+          await new Promise((r) => {
+            pollTimer = setTimeout(r, 500)
+          })
         }
 
+        if (settled) return
         Logger.error(`[BackupManager] Backup sqlite timed out`)
         finish('Backup timed out')
       }
@@ -639,6 +645,10 @@ class BackupManager {
       const startBackup = () => {
         try {
           sqliteBackup = db.backup(dbFilePath)
+          // The driver opens the destination itself and reports a failure to open it, or a failed
+          // step, as an 'error' event on the Backup object. Without a listener that event is
+          // uncaught, so it takes the same settle path as every other failure.
+          sqliteBackup.on('error', finish)
           sqliteBackup.step(-1)
           sqliteBackup.finish()
           pollBackup().catch(finish)
