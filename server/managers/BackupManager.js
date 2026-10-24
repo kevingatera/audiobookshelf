@@ -299,35 +299,58 @@ class BackupManager {
   }
 
   async requestApplyPostgresBackup(apiCacheManager, backup, zip, entries, res) {
-    await Database.disconnect()
-
-    const dumpPath = Path.join(global.ConfigPath, 'absdatabase-temp.postgres.dump')
+    // Everything that can fail on the archive is staged before the database is touched. The metadata folders are
+    // moved into place after the restore, so a failure after the restore still leaves a reconnected server.
+    const stagingPath = Path.join(global.ConfigPath, 'absdatabase-restore-staging')
+    const dumpPath = Path.join(stagingPath, 'absdatabase.postgres.dump')
+    let disconnected = false
     try {
+      await fs.remove(stagingPath)
+      await fs.ensureDir(stagingPath)
       await zip.extract('absdatabase.postgres.dump', dumpPath)
+      await zip.extract('metadata-items/', Path.join(stagingPath, 'metadata-items'))
+      await zip.extract('metadata-authors/', Path.join(stagingPath, 'metadata-authors'))
+
+      await Database.disconnect()
+      disconnected = true
+      // The restore runs in one transaction, so a failure rolls back and the original data is still there.
       await this.restorePostgresDb(dumpPath)
       Logger.info(`[BackupManager] Restored postgres database from backup "${backup.filename}"`)
-    } catch (error) {
-      // A failed restore rolls back, so the original data is still there. Reconnect and report.
-      Logger.error(`[BackupManager] Failed to restore postgres backup`, error)
-      await zip.close().catch(() => {})
-      await fs.remove(dumpPath).catch(() => {})
+
+      await this.placeStagedMetadata(stagingPath)
       await Database.reconnect()
+      disconnected = false
+      await apiCacheManager.reset()
+      await CacheManager.purgeAll()
+    } catch (error) {
+      Logger.error(`[BackupManager] Failed to apply postgres backup`, error)
+      if (disconnected) {
+        await Database.reconnect().catch((reconnectError) => Logger.error(`[BackupManager] Failed to reconnect after a failed postgres restore`, reconnectError))
+      }
       return res.status(500).send(`Failed to apply postgres backup: ${error?.message || 'Unknown Error'}`)
+    } finally {
+      await zip.close().catch(() => {})
+      await fs.remove(stagingPath).catch((err) => Logger.error(`[BackupManager] Failed to remove restore staging folder`, err))
     }
-    await fs.remove(dumpPath).catch(() => {})
-
-    await fs.ensureDir(this.ItemsMetadataPath)
-    await zip.extract('metadata-items/', this.ItemsMetadataPath)
-    await fs.ensureDir(this.AuthorsMetadataPath)
-    await zip.extract('metadata-authors/', this.AuthorsMetadataPath)
-    await zip.close()
-
-    await Database.reconnect()
-    await apiCacheManager.reset()
-    await CacheManager.purgeAll()
 
     res.sendStatus(200)
     SocketAuthority.emitter('backup_applied')
+  }
+
+  /**
+   * Copies the staged metadata folders into the metadata paths. Missing folders are skipped.
+   * @param {string} stagingPath
+   */
+  async placeStagedMetadata(stagingPath) {
+    const folders = [
+      [Path.join(stagingPath, 'metadata-items'), this.ItemsMetadataPath],
+      [Path.join(stagingPath, 'metadata-authors'), this.AuthorsMetadataPath]
+    ]
+    for (const [source, destination] of folders) {
+      if (!(await fs.pathExists(source))) continue
+      await fs.ensureDir(destination)
+      await fs.copy(source, destination, { overwrite: true })
+    }
   }
 
   async loadBackups() {
