@@ -36,10 +36,24 @@ module.exports = {
         if (model.options.indexes.find((i) => i.name === index.name && i.where)) continue
         const match = existing.some((e) => e.unique === index.unique && e.columns.join(',') === index.fields.join(','))
         if (match) continue
-        const name = (index.name || `${table}_${index.fields.join('_')}${index.unique ? '_unique' : ''}`).toLowerCase()
+        const base = (index.name || `${table}_${index.fields.join('_')}${index.unique ? '_unique' : ''}`).toLowerCase()
+        const name = await unusedRelationName(sequelize, base)
         logger.info(`[fork-pg-0004-model-indexes] Creating index ${name} on ${table} (${index.fields.join(', ')})`)
         await sequelize.getQueryInterface().addIndex(table, index.fields, { name, unique: index.unique })
       }
     }
+  }
+}
+
+// Index names share one namespace with every table and index in the schema. A name held by a wrong index is taken,
+// so the new index gets the first free `_N` suffix instead of replacing it.
+async function unusedRelationName(sequelize, base) {
+  for (let suffix = 1; ; suffix++) {
+    const candidate = suffix === 1 ? base : `${base}_${suffix}`
+    const taken = await sequelize.query(
+      'SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = current_schema() AND lower(c.relname) = lower(:name)',
+      { replacements: { name: candidate }, type: Sequelize.QueryTypes.SELECT }
+    )
+    if (!taken.length) return candidate
   }
 }

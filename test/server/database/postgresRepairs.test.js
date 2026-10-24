@@ -13,6 +13,10 @@ describe('Postgres schema repairs', function () {
     return Database.sequelize.query(sql, { replacements, type: 'SELECT' })
   }
 
+  async function bookIndexes() {
+    return query("SELECT indexname AS name, indexdef AS def FROM pg_indexes WHERE schemaname = current_schema() AND lower(tablename) = 'books' ORDER BY indexname")
+  }
+
   async function columnType(table, column) {
     const [row] = await query(`SELECT data_type AS type FROM information_schema.columns WHERE table_schema = current_schema() AND lower(table_name) = lower(:table) AND lower(column_name) = lower(:column)`, { table, column })
     return row && row.type
@@ -40,6 +44,9 @@ describe('Postgres schema repairs', function () {
     // The deployed fork's author trigger watched only name, before lastFirst was added to it.
     await sequelize.query('DROP TRIGGER IF EXISTS update_library_items_author_names_on_authors_update ON authors')
     await sequelize.query('CREATE TRIGGER update_library_items_author_names_on_authors_update AFTER UPDATE OF name ON authors FOR EACH ROW EXECUTE FUNCTION update_library_items_author_names_on_authors_update_fn()')
+    // An old database had a books_title index on duration, so the declared title index needs another name.
+    await sequelize.query('DROP INDEX IF EXISTS books_title')
+    await sequelize.query('CREATE INDEX books_title ON books (duration)')
   })
 
   after(async function () {
@@ -56,6 +63,15 @@ describe('Postgres schema repairs', function () {
     expect(await columnType('users', 'token')).to.equal('text')
     expect(await columnType('books', 'subtitle')).to.equal('text')
     expect(await columnType('playbackSessions', 'timeListening')).to.equal('double precision')
+  })
+
+  it('creates the title index under a free name and keeps the existing books_title index', async function () {
+    const indexes = await bookIndexes()
+    const titleIndexes = indexes.filter((i) => /\(title\)/i.test(i.def))
+    expect(titleIndexes).to.have.length(1)
+    expect(titleIndexes[0].name).to.not.equal('books_title')
+    const kept = indexes.find((i) => i.name === 'books_title')
+    expect(kept.def).to.contain('(duration)')
   })
 
   it('collapses duplicate meta rows to the highest version and adds the unique key', async function () {
@@ -114,9 +130,11 @@ describe('Postgres schema repairs', function () {
 
   it('is idempotent across repeated runs and across a normal boot', async function () {
     const PostgresRepairManager = require('../../../server/managers/PostgresRepairManager')
+    const indexesBefore = (await bookIndexes()).map((i) => i.name)
     await new PostgresRepairManager(Database.sequelize).run('before')
     await new PostgresRepairManager(Database.sequelize).run('after')
-    const triggers = await query("SELECT count(*) AS n FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid WHERE NOT t.tgisinternal AND c.relname IN ('libraryitems','books','podcasts','bookauthors','authors')")
+    expect((await bookIndexes()).map((i) => i.name)).to.deep.equal(indexesBefore)
+    const triggers =await query("SELECT count(*) AS n FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid WHERE NOT t.tgisinternal AND c.relname IN ('libraryitems','books','podcasts','bookauthors','authors')")
     expect(Number(triggers[0].n)).to.equal(8)
     await Database.disconnect()
     await Database.init(false)
