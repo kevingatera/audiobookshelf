@@ -145,9 +145,9 @@ module.exports = {
       .slice(0, 3)
 
     // Stats for total books, size and duration for everything added this year or earlier
-    const [totalStatResultsRow] = await Database.sequelize.query(`SELECT SUM(li.size) AS totalSize, SUM(b.duration) AS totalDuration, COUNT(*) AS totalItems FROM libraryItems li, books b WHERE b.id = li.mediaId AND li.mediaType = 'book' AND li.createdAt < ":nextYear-01-01";`, {
+    const [totalStatResultsRow] = await Database.sequelize.query(`SELECT SUM(li.size) AS ${Database.adapter.aliasAs('totalSize')}, SUM(b.duration) AS ${Database.adapter.aliasAs('totalDuration')}, COUNT(*) AS ${Database.adapter.aliasAs('totalItems')} FROM libraryItems li, books b WHERE b.id = li.mediaId AND li.mediaType = 'book' AND li.createdAt < :cutoff;`, {
       replacements: {
-        nextYear: year + 1
+        cutoff: `${year + 1}-01-01`
       }
     })
     const totalStatResults = totalStatResultsRow[0]
@@ -179,7 +179,7 @@ module.exports = {
    * @returns {Promise<{books: SizeObject, podcasts: SizeObject, total: SizeObject}}>}
    */
   async getTotalSize() {
-    const [mediaTypeStats] = await Database.sequelize.query(`SELECT li.mediaType, SUM(li.size) AS totalSize, COUNT(*) AS numItems FROM libraryItems li group by li.mediaType;`)
+    const [mediaTypeStats] = await Database.sequelize.query(`SELECT li.mediaType AS ${Database.adapter.aliasAs('mediaType')}, SUM(li.size) AS ${Database.adapter.aliasAs('totalSize')}, COUNT(*) AS ${Database.adapter.aliasAs('numItems')} FROM libraryItems li group by li.mediaType;`)
     const bookStats = mediaTypeStats.find((m) => m.mediaType === 'book')
     const podcastStats = mediaTypeStats.find((m) => m.mediaType === 'podcast')
 
@@ -205,7 +205,7 @@ module.exports = {
    * @returns {Promise<{numBookAudioFiles: number, numPodcastAudioFiles: number, numAudioFiles: number}>}
    */
   async getNumAudioFiles() {
-    const [numBookAudioFilesRow] = await Database.sequelize.query(`SELECT SUM(json_array_length(b.audioFiles)) AS numAudioFiles FROM books b;`)
+    const [numBookAudioFilesRow] = await Database.sequelize.query(`SELECT SUM(${Database.adapter.jsonArrayLength('b.audioFiles')}) AS ${Database.adapter.aliasAs('numAudioFiles')} FROM books b;`)
     const numBookAudioFiles = numBookAudioFilesRow[0]?.numAudioFiles || 0
     const numPodcastAudioFiles = await Database.podcastEpisodeModel.count()
     return {

@@ -240,13 +240,13 @@ module.exports = {
     if (userPermissionBookWhere.bookWhere.length) {
       let attrQuery = 'SELECT count(*) FROM books b, bookSeries bs WHERE bs.seriesId = series.id AND bs.bookId = b.id'
       if (!user.canAccessExplicitContent) {
-        attrQuery += ' AND b.explicit = 0'
+        attrQuery += ` AND b.explicit = ${Database.adapter.bool(false)}`
       }
       if (!user.permissions?.accessAllTags && user.permissions?.itemTagsSelected?.length) {
         if (user.permissions.selectedTagsNotAccessible) {
-          attrQuery += ' AND (SELECT count(*) FROM json_each(tags) WHERE json_valid(tags) AND json_each.value IN (:userTagsSelected)) = 0'
+          attrQuery += ` AND ${Database.adapter.jsonArrayContainsAny('tags', 'userTagsSelected')} = 0`
         } else {
-          attrQuery += ' AND (SELECT count(*) FROM json_each(tags) WHERE json_valid(tags) AND json_each.value IN (:userTagsSelected)) > 0'
+          attrQuery += ` AND ${Database.adapter.jsonArrayContainsAny('tags', 'userTagsSelected')} > 0`
         }
       }
       seriesWhere.push(

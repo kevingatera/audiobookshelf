@@ -7,6 +7,7 @@ const { filePathToPOSIX, getFileTimestampsWithIno } = require('../utils/fileUtil
 const LibraryFile = require('../objects/files/LibraryFile')
 const Book = require('./Book')
 const Podcast = require('./Podcast')
+const { dialectFor } = require('../utils/dialectAdapter')
 
 /**
  * @typedef LibraryFileObject
@@ -764,16 +765,16 @@ class LibraryItem extends Model {
             fields: ['libraryId', 'mediaType', 'createdAt']
           },
           {
-            fields: ['libraryId', 'mediaType', { name: 'title', collate: 'NOCASE' }]
+            fields: ['libraryId', 'mediaType', dialectFor(sequelize).indexField('title')]
           },
           {
-            fields: ['libraryId', 'mediaType', { name: 'titleIgnorePrefix', collate: 'NOCASE' }]
+            fields: ['libraryId', 'mediaType', dialectFor(sequelize).indexField('titleIgnorePrefix')]
           },
           {
-            fields: ['libraryId', 'mediaType', { name: 'authorNamesFirstLast', collate: 'NOCASE' }]
+            fields: ['libraryId', 'mediaType', dialectFor(sequelize).indexField('authorNamesFirstLast')]
           },
           {
-            fields: ['libraryId', 'mediaType', { name: 'authorNamesLastFirst', collate: 'NOCASE' }]
+            fields: ['libraryId', 'mediaType', dialectFor(sequelize).indexField('authorNamesLastFirst')]
           },
           {
             fields: ['libraryId', 'mediaId', 'mediaType']

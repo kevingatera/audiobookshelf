@@ -9,10 +9,12 @@ const dbMigration = require('./utils/migrations/dbMigration')
 const Auth = require('./Auth')
 
 const MigrationManager = require('./managers/MigrationManager')
+const { dialectFor, resolveDialect, createSequelize } = require('./utils/dialectAdapter')
 
 class Database {
   constructor() {
     this.sequelize = null
+    this.dialect = 'sqlite' // 'sqlite' | 'postgres', see utils/dialectAdapter
     this.dbPath = null
     this.isNew = false // New absdatabase.sqlite created
     this.hasRootUser = false // Used to show initialization page in web ui
@@ -35,6 +37,14 @@ class Database {
 
   get models() {
     return this.sequelize?.models || {}
+  }
+
+  /**
+   * Dialect adapter for the connected database. Callers ask it for SQL fragments instead of testing the dialect.
+   * @returns {import('./utils/dialectAdapter').SqliteAdapter|import('./utils/dialectAdapter').PostgresAdapter}
+   */
+  get adapter() {
+    return dialectFor(this.sequelize)
   }
 
   /** @type {typeof import('./models/User')} */
@@ -174,13 +184,23 @@ class Database {
    * @param {boolean} [force=false] Used for testing, drops & re-creates all tables
    */
   async init(force = false) {
-    this.dbPath = Path.join(global.ConfigPath, 'absdatabase.sqlite')
-
-    // First check if this is a new database
-    this.isNew = !(await this.checkHasDb()) || force
+    this.dialect = resolveDialect()
+    if (this.dialect === 'sqlite') {
+      this.dbPath = Path.join(global.ConfigPath, 'absdatabase.sqlite')
+      // First check if this is a new database
+      this.isNew = !(await this.checkHasDb()) || force
+    } else {
+      this.dbPath = null
+      this.isNew = !!force
+    }
 
     if (!(await this.connect())) {
       throw new Error('Database connection failed')
+    }
+
+    if (!this.adapter.fileBased && !force) {
+      // A postgres database with no tables is new. Its schema is created from the models.
+      this.isNew = !(await this.adapter.hasTables())
     }
 
     try {
@@ -209,7 +229,11 @@ class Database {
    * @returns {boolean}
    */
   async connect() {
-    Logger.info(`[Database] Initializing db at "${this.dbPath}"`)
+    if (this.dialect === 'sqlite') {
+      Logger.info(`[Database] Initializing sqlite db at "${this.dbPath}"`)
+    } else {
+      Logger.info(`[Database] Initializing ${this.dialect} db connection`)
+    }
 
     let logging = false
     let benchmark = false
@@ -224,48 +248,45 @@ class Database {
       benchmark = true
     }
 
-    this.sequelize = new Sequelize({
-      dialect: 'sqlite',
-      storage: this.dbPath,
-      logging: logging,
-      benchmark: benchmark,
-      transactionType: 'IMMEDIATE'
-    })
+    this.sequelize = createSequelize({ dialect: this.dialect, storage: this.dbPath, databaseUrl: process.env.DATABASE_URL, logging, benchmark })
 
     // Helper function
     this.sequelize.uppercaseFirst = (str) => (str ? `${str[0].toUpperCase()}${str.substr(1)}` : '')
 
     try {
       await this.sequelize.authenticate()
+      this.adapter.configureTypes()
 
-      // Set SQLite pragmas from environment variables
-      const allowedPragmas = [
-        { name: 'mmap_size', env: 'SQLITE_MMAP_SIZE' },
-        { name: 'cache_size', env: 'SQLITE_CACHE_SIZE' },
-        { name: 'temp_store', env: 'SQLITE_TEMP_STORE' }
-      ]
+      if (this.adapter.fileBased) {
+        // Set SQLite pragmas from environment variables
+        const allowedPragmas = [
+          { name: 'mmap_size', env: 'SQLITE_MMAP_SIZE' },
+          { name: 'cache_size', env: 'SQLITE_CACHE_SIZE' },
+          { name: 'temp_store', env: 'SQLITE_TEMP_STORE' }
+        ]
 
-      for (const pragma of allowedPragmas) {
-        const value = process.env[pragma.env]
-        if (value !== undefined) {
-          try {
-            Logger.info(`[Database] Running "PRAGMA ${pragma.name} = ${value}"`)
-            await this.sequelize.query(`PRAGMA ${pragma.name} = ${value}`)
-            const [result] = await this.sequelize.query(`PRAGMA ${pragma.name}`)
-            Logger.debug(`[Database] "PRAGMA ${pragma.name}" query result:`, result)
-          } catch (error) {
-            Logger.error(`[Database] Failed to set SQLite pragma ${pragma.name}`, error)
+        for (const pragma of allowedPragmas) {
+          const value = process.env[pragma.env]
+          if (value !== undefined) {
+            try {
+              Logger.info(`[Database] Running "PRAGMA ${pragma.name} = ${value}"`)
+              await this.sequelize.query(`PRAGMA ${pragma.name} = ${value}`)
+              const [result] = await this.sequelize.query(`PRAGMA ${pragma.name}`)
+              Logger.debug(`[Database] "PRAGMA ${pragma.name}" query result:`, result)
+            } catch (error) {
+              Logger.error(`[Database] Failed to set SQLite pragma ${pragma.name}`, error)
+            }
           }
         }
-      }
 
-      if (process.env.NUSQLITE3_PATH) {
-        await this.loadExtension(process.env.NUSQLITE3_PATH)
-        Logger.info(`[Database] Db supports unaccent and unicode foldings`)
-        this.supportsUnaccent = true
-        this.supportsUnicodeFoldings = true
+        if (process.env.NUSQLITE3_PATH) {
+          await this.loadExtension(process.env.NUSQLITE3_PATH)
+          Logger.info(`[Database] Db supports unaccent and unicode foldings`)
+          this.supportsUnaccent = true
+          this.supportsUnicodeFoldings = true
+        }
       }
-      Logger.info(`[Database] Db connection was successful`)
+      Logger.info(`[Database] Db connection was successful (${this.dialect})`)
       return true
     } catch (error) {
       Logger.error(`[Database] Failed to connect to db`, error)
@@ -302,7 +323,7 @@ class Database {
    * Disconnect from db
    */
   async disconnect() {
-    Logger.info(`[Database] Disconnecting sqlite db`)
+    Logger.info(`[Database] Disconnecting ${this.dialect} db`)
     await this.sequelize.close()
   }
 
@@ -310,7 +331,7 @@ class Database {
    * Reconnect to db and init
    */
   async reconnect() {
-    Logger.info(`[Database] Reconnecting sqlite db`)
+    Logger.info(`[Database] Reconnecting ${this.dialect} db`)
     await this.init()
   }
 
@@ -341,6 +362,12 @@ class Database {
     require('./models/CustomMetadataProvider').init(this.sequelize)
     require('./models/MediaItemShare').init(this.sequelize)
 
+    if (!this.adapter.fileBased && !force && !this.isNew) {
+      // Existing postgres schemas are maintained by migrations, not by sync
+      Logger.info('[Database] Skipping sequelize.sync for existing postgres schema')
+      return Promise.resolve()
+    }
+
     return this.sequelize.sync({ force, alter: false })
   }
 
@@ -363,7 +390,7 @@ class Database {
    * Loads most of the data from the database. This is a temporary solution.
    */
   async loadData() {
-    if (this.isNew && (await dbMigration.checkShouldMigrate())) {
+    if (this.adapter.fileBased && this.isNew && (await dbMigration.checkShouldMigrate())) {
       Logger.info(`[Database] New database was created and old database was detected - migrating old to new`)
       await dbMigration.migrate(this.models)
     }
@@ -862,6 +889,10 @@ WHERE EXISTS (
    * It adds triggers to update libraryItems.title[IgnorePrefix] when (books|podcasts).title[IgnorePrefix] is updated
    */
   async addTriggers() {
+    if (!this.adapter.fileBased) {
+      Logger.info(`[Database] Skipping sqlite triggers for ${this.dialect}`)
+      return
+    }
     await this.addTriggerIfNotExists('books', 'title', 'id', 'libraryItems', 'title', 'mediaId')
     await this.addTriggerIfNotExists('books', 'titleIgnorePrefix', 'id', 'libraryItems', 'titleIgnorePrefix', 'mediaId')
     await this.addTriggerIfNotExists('podcasts', 'title', 'id', 'libraryItems', 'title', 'mediaId')
@@ -874,8 +905,7 @@ WHERE EXISTS (
     const fromSource = sourceTable === 'books' ? '' : `_from_${sourceTable}_${sourceColumn}`
     const triggerName = this.convertToSnakeCase(`${action}${fromSource}`)
 
-    const [[{ count }]] = await this.sequelize.query(`SELECT COUNT(*) as count FROM sqlite_master WHERE type='trigger' AND name='${triggerName}'`)
-    if (count > 0) return // Trigger already exists
+    if (await this.adapter.triggerExists(sourceTable, triggerName)) return // Trigger already exists
 
     Logger.info(`[Database] Adding trigger ${triggerName}`)
 
@@ -912,8 +942,7 @@ WHERE EXISTS (
         FROM ${authorsJoin}
         WHERE ${bookAuthors}.bookId = ${modifiedRecord}.bookId
       `
-      const [[{ count }]] = await this.sequelize.query(`SELECT COUNT(*) as count FROM sqlite_master WHERE type='trigger' AND name='${triggerName}'`)
-      if (count > 0) return // Trigger already exists
+      if (await this.adapter.triggerExists('bookAuthors', triggerName)) return // Trigger already exists
 
       Logger.info(`[Database] Adding trigger ${triggerName}`)
 
@@ -937,8 +966,7 @@ WHERE EXISTS (
         WHERE ${bookAuthors}.bookId = ${libraryItems}.mediaId
       `
 
-      const [[{ count }]] = await this.sequelize.query(`SELECT COUNT(*) as count FROM sqlite_master WHERE type='trigger' AND name='${triggerName}'`)
-      if (count > 0) return // Trigger already exists
+      if (await this.adapter.triggerExists('authors', triggerName)) return // Trigger already exists
 
       Logger.info(`[Database] Adding trigger ${triggerName}`)
 
@@ -1004,9 +1032,9 @@ WHERE EXISTS (
      */
     matchExpression(column) {
       const pattern = this.sequelize.escape(`%${this.query}%`)
-      if (!this.supportsUnaccent) return `${column} LIKE ${pattern}`
+      if (!this.supportsUnaccent) return dialectFor(this.sequelize).like(column, pattern)
       const normalizedColumn = this.hasAccents ? column : this.normalize(column)
-      return `${normalizedColumn} LIKE ${pattern}`
+      return dialectFor(this.sequelize).like(normalizedColumn, pattern)
     }
   }
 }

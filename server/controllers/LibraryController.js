@@ -1045,9 +1045,9 @@ class LibraryController {
     let order = undefined
     const direction = payload.sortDesc ? 'DESC' : 'ASC'
     if (payload.sortBy === 'name') {
-      order = [[Sequelize.literal('name COLLATE NOCASE'), direction]]
+      order = [[Sequelize.literal(Database.adapter.noCaseOrder('name')), direction]]
     } else if (payload.sortBy === 'lastFirst') {
-      order = [[Sequelize.literal('lastFirst COLLATE NOCASE'), direction]]
+      order = [[Sequelize.literal(Database.adapter.noCaseOrder('lastFirst')), direction]]
     } else if (payload.sortBy === 'addedAt') {
       order = [['createdAt', direction]]
     } else if (payload.sortBy === 'updatedAt') {
@@ -1116,7 +1116,7 @@ class LibraryController {
   async getNarrators(req, res) {
     // Get all books with narrators
     const booksWithNarrators = await Database.bookModel.findAll({
-      where: Sequelize.where(Sequelize.fn('json_array_length', Sequelize.col('narrators')), {
+      where: Sequelize.where(Sequelize.literal(Database.adapter.jsonArrayLength('narrators')), {
         [Sequelize.Op.gt]: 0
       }),
       include: {
@@ -1350,10 +1350,11 @@ class LibraryController {
         {
           libraryId: req.library.id
         },
-        Sequelize.where(Sequelize.literal(`(SELECT count(*) FROM json_each(libraryFiles) WHERE json_valid(libraryFiles) AND json_extract(json_each.value, "$.metadata.filename") = "${metadataFilename}")`), {
+        Sequelize.where(Sequelize.literal(`(SELECT count(*) FROM ${Database.adapter.jsonArrayExpand('libraryFiles', { objects: true })} WHERE ${Database.adapter.jsonValid('libraryFiles')} AND ${Database.adapter.jsonElementText('json_each', ['metadata', 'filename'])} = :metadataFilename)`), {
           [Sequelize.Op.gte]: 1
         })
-      ]
+      ],
+      replacements: { metadataFilename }
     })
     if (!libraryItemsWithMetadata.length) {
       Logger.info(`[LibraryController] No ${metadataFilename} files found to remove`)

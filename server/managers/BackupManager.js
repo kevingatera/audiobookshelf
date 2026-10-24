@@ -3,6 +3,7 @@ const Path = require('path')
 const Logger = require('../Logger')
 const SocketAuthority = require('../SocketAuthority')
 const Database = require('../Database')
+const { dialectFor } = require('../utils/dialectAdapter')
 
 const cron = require('../libs/nodeCron')
 const fs = require('../libs/fsExtra')
@@ -406,6 +407,10 @@ class BackupManager {
    * @param {Backup} backup
    */
   backupSqliteDb(backup) {
+    if (!dialectFor(Database.sequelize).fileBased) {
+      // pg_dump based backups arrive with the native backup change
+      return Promise.reject(new Error(`Backups are not available for the ${Database.dialect} dialect yet`))
+    }
     const db = new sqlite3.Database(Database.dbPath)
     const dbFilePath = Path.join(global.ConfigPath, `absdatabase.${backup.id}.sqlite`)
     return new Promise(async (resolve, reject) => {
