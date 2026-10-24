@@ -341,3 +341,6 @@ module.exports.getQueryParamAsString = (query, paramName, defaultValue = '', req
   }
   return String(value)
 }
+
+/** `?minified=1` or `?minified=true` drops the per-item and recent session lists from stats. */
+module.exports.isMinifiedRequest = (req) => ['1', 'true'].includes(String(req.query.minified))

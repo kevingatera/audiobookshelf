@@ -448,9 +448,19 @@ class Database {
     return this.models.setting.updateSettingObj(settings.toJSON())
   }
 
-  getPlaybackSessions(where = null) {
+  getPlaybackSessions(where = null, options = {}) {
     if (!this.sequelize) return false
-    return this.models.playbackSession.getOldPlaybackSessions(where)
+    return this.models.playbackSession.getOldPlaybackSessions(where, options)
+  }
+
+  countPlaybackSessions(where = null) {
+    if (!this.sequelize) return false
+    return this.models.playbackSession.countWithWhere(where)
+  }
+
+  getListeningStats(userId, options = {}) {
+    if (!this.sequelize) return false
+    return this.models.playbackSession.getListeningStats(userId, options)
   }
 
   getPlaybackSession(sessionId) {
