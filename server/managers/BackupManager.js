@@ -1,9 +1,12 @@
 const sqlite3 = require('sqlite3')
 const Path = require('path')
+const { randomUUID } = require('crypto')
 const Logger = require('../Logger')
 const SocketAuthority = require('../SocketAuthority')
 const Database = require('../Database')
 const { dialectFor } = require('../utils/dialectAdapter')
+const { dumpArgs, restoreArgs, runPostgresTool } = require('../utils/postgresTools')
+const restoreMaintenance = require('../utils/restoreMaintenance')
 
 const cron = require('../libs/nodeCron')
 const fs = require('../libs/fsExtra')
@@ -18,6 +21,10 @@ const Backup = require('../objects/Backup')
 const CacheManager = require('./CacheManager')
 const NotificationManager = require('./NotificationManager')
 
+const OTHER_CLIENTS_MESSAGE = 'Another client is connected to this database. Stop it, then restore again.'
+// A close on a wedged sqlite handle never calls back, so the backup settles after this grace period.
+const SQLITE_CLOSE_DEADLINE_MS = 5000
+
 class BackupManager {
   constructor() {
     this.ItemsMetadataPath = Path.join(global.MetadataPath, 'items')
@@ -30,6 +37,18 @@ class BackupManager {
 
   get backupPath() {
     return global.ServerSettings.backupPath
+  }
+
+  /** Archive entry name for the database in this server. */
+  get currentBackupEntry() {
+    return dialectFor(Database.sequelize).fileBased ? 'absdatabase.sqlite' : 'absdatabase.postgres.dump'
+  }
+
+  /** Dialect of the database a backup archive was made from, or null when the archive has no database entry. */
+  static backupDialectOf(entries) {
+    if (entries['absdatabase.postgres.dump']) return 'postgres'
+    if (entries['absdatabase.sqlite']) return 'sqlite'
+    return null
   }
 
   get backupPathEnvSet() {
@@ -131,11 +150,19 @@ class BackupManager {
       await fs.remove(tempPath).catch((err) => Logger.error(`[BackupManager] Failed to remove rejected backup file "${tempPath}"`, err))
       return res.status(400).send('Failed to read backup file - backup might not be a valid .zip file')
     }
-    if (!entries['absdatabase.sqlite']) {
-      Logger.error(`[BackupManager] Invalid backup with no absdatabase.sqlite file - might be a backup created on an old Audiobookshelf server.`)
+    const uploadedDialect = BackupManager.backupDialectOf(entries)
+    if (!uploadedDialect) {
+      Logger.error(`[BackupManager] Invalid backup with no database file - might be a backup created on an old Audiobookshelf server.`)
       await zip.close().catch(() => {})
       await fs.remove(tempPath).catch((err) => Logger.error(`[BackupManager] Failed to remove rejected backup file "${tempPath}"`, err))
       return res.status(500).send('Invalid backup with no absdatabase.sqlite file - might be a backup created on an old Audiobookshelf server.')
+    }
+    const currentDialect = dialectFor(Database.sequelize).fileBased ? 'sqlite' : 'postgres'
+    if (uploadedDialect !== currentDialect) {
+      Logger.error(`[BackupManager] Backup uses ${uploadedDialect}, this server uses ${currentDialect}`)
+      await zip.close().catch(() => {})
+      await fs.remove(tempPath).catch((err) => Logger.error(`[BackupManager] Failed to remove rejected backup file "${tempPath}"`, err))
+      return res.status(400).send(`This backup was made with the ${uploadedDialect} database. This server uses ${currentDialect}.`)
     }
 
     const detailsEntry = entries['details']
@@ -205,6 +232,16 @@ class BackupManager {
 
     const entries = await zip.entries()
 
+    const backupDialect = BackupManager.backupDialectOf(entries)
+    const currentDialect = dialectFor(Database.sequelize).fileBased ? 'sqlite' : 'postgres'
+    if (backupDialect === 'postgres' && currentDialect === 'postgres') {
+      return this.requestApplyPostgresBackup(apiCacheManager, backup, zip, entries, res)
+    }
+    if (backupDialect !== currentDialect) {
+      await zip.close()
+      return res.status(400).send(`This backup was made with the ${backupDialect || 'unknown'} database. This server uses ${currentDialect}.`)
+    }
+
     // Ensure backup has an absdatabase.sqlite file
     if (!Object.keys(entries).includes('absdatabase.sqlite')) {
       Logger.error(`[BackupManager] Cannot apply old backup ${backup.fullPath}`)
@@ -267,6 +304,117 @@ class BackupManager {
     SocketAuthority.emitter('backup_applied')
   }
 
+  async requestApplyPostgresBackup(apiCacheManager, backup, zip, entries, res) {
+    // Each request stages in its own folder, so a request that is refused cannot remove the dump of one that is running.
+    const stagingPath = Path.join(global.ConfigPath, `absdatabase-restore-${randomUUID()}`)
+    const dumpPath = Path.join(stagingPath, 'absdatabase.postgres.dump')
+    let result
+    try {
+      result = await this.applyPostgresBackup(apiCacheManager, backup, zip, stagingPath, dumpPath)
+    } finally {
+      await zip.close().catch(() => {})
+      await fs.remove(stagingPath).catch((err) => Logger.error(`[BackupManager] Failed to remove restore staging folder`, err))
+    }
+    if (result.status !== 200) return res.status(result.status).send(result.message)
+
+    res.sendStatus(200)
+    SocketAuthority.emitter('backup_applied')
+  }
+
+  /**
+   * Restores the Postgres database from a staged archive. Never throws.
+   *
+   * Order: stage the archive, open the maintenance window (HTTP and sockets get 503), take the exclusive database lock,
+   * disconnect this instance's pool, count other sessions, then pg_restore. The count is the last check before
+   * pg_restore. On every path the pool is reconnected if it was closed, the lock is released and the window closes.
+   * @returns {Promise<{status: number, message?: string}>}
+   */
+  async applyPostgresBackup(apiCacheManager, backup, zip, stagingPath, dumpPath) {
+    if (!restoreMaintenance.begin()) return { status: 409, message: 'A restore is already running on this instance.' }
+
+    const lock = Database.restoreLock
+    let exclusive = false
+    let disconnected = false
+    try {
+      try {
+        await this.stagePostgresBackup(zip, stagingPath, dumpPath)
+      } catch (error) {
+        Logger.error(`[BackupManager] Failed to apply postgres backup`, error)
+        return { status: 500, message: `Failed to apply postgres backup: ${error?.message || 'Unknown Error'}` }
+      }
+
+      // Fails while any other running instance holds the shared lock.
+      if (!(await lock.tryExclusive())) {
+        Logger.warn(`[BackupManager] Refusing postgres restore while another instance of this app is running on the database`)
+        return { status: 409, message: OTHER_CLIENTS_MESSAGE }
+      }
+      exclusive = true
+
+      await Database.disconnect()
+      disconnected = true
+      await lock.confirmExclusive()
+
+      const others = await lock.countOtherSessions()
+      if (others > 0) {
+        Logger.warn(`[BackupManager] Refusing postgres restore while ${others} other database session(s) are open`)
+        return { status: 409, message: OTHER_CLIENTS_MESSAGE }
+      }
+
+      lock.assertExclusive()
+      await this.restorePostgresDb(dumpPath)
+      lock.assertExclusive()
+      Logger.info(`[BackupManager] Restored postgres database from backup "${backup.filename}"`)
+
+      await this.placeStagedMetadata(stagingPath)
+      await Database.reconnect()
+      disconnected = false
+      await apiCacheManager.reset()
+      await CacheManager.purgeAll()
+      return { status: 200 }
+    } catch (error) {
+      Logger.error(`[BackupManager] Failed to apply postgres backup`, error)
+      return { status: 500, message: `Failed to apply postgres backup: ${error?.message || 'Unknown Error'}` }
+    } finally {
+      if (disconnected) await Database.reconnect().catch((err) => Logger.error(`[BackupManager] Failed to reconnect after a failed postgres restore`, err))
+      if (exclusive) await lock.releaseExclusive().catch((err) => Logger.error(`[BackupManager] Failed to release the database restore lock`, err))
+      restoreMaintenance.end()
+    }
+  }
+
+  /**
+   * Extracts the dump and the metadata folders into the staging folder. Fails when the archive has no dump.
+   * Nothing outside the staging folder is touched.
+   */
+  async stagePostgresBackup(zip, stagingPath, dumpPath) {
+    await fs.remove(stagingPath)
+    await fs.ensureDir(stagingPath)
+    const itemsStagingPath = Path.join(stagingPath, 'metadata-items')
+    const authorsStagingPath = Path.join(stagingPath, 'metadata-authors')
+    await fs.ensureDir(itemsStagingPath)
+    await fs.ensureDir(authorsStagingPath)
+    await zip.extract('absdatabase.postgres.dump', dumpPath)
+    await zip.extract('metadata-items/', itemsStagingPath)
+    await zip.extract('metadata-authors/', authorsStagingPath)
+    // node-stream-zip resolves without writing when the entry is missing, so check the file itself.
+    if (!(await fs.pathExists(dumpPath))) throw new Error('Backup archive has no database dump')
+  }
+
+  /**
+   * Copies the staged metadata folders into the metadata paths. Missing folders are skipped.
+   * @param {string} stagingPath
+   */
+  async placeStagedMetadata(stagingPath) {
+    const folders = [
+      [Path.join(stagingPath, 'metadata-items'), this.ItemsMetadataPath],
+      [Path.join(stagingPath, 'metadata-authors'), this.AuthorsMetadataPath]
+    ]
+    for (const [source, destination] of folders) {
+      if (!(await fs.pathExists(source))) continue
+      await fs.ensureDir(destination)
+      await fs.copy(source, destination, { overwrite: true })
+    }
+  }
+
   async loadBackups() {
     try {
       const filesInDir = await fs.readdir(this.backupPath)
@@ -277,7 +425,7 @@ class BackupManager {
           const fullFilePath = Path.join(this.backupPath, filename)
 
           let zip = null
-          let data = null
+          let backup = null
           try {
             zip = new StreamZip.async({ file: fullFilePath })
             const entries = await zip.entries()
@@ -294,16 +442,22 @@ class BackupManager {
               continue
             }
 
-            data = await zip.entryData('details')
+            const data = await zip.entryData('details')
+            const details = data.toString('utf8').split('\n')
+
+            backup = new Backup({ details, fullPath: fullFilePath })
+
+            // An archive without a database entry cannot be applied, so it is not listed.
+            if (!BackupManager.backupDialectOf(entries)) {
+              Logger.error(`[BackupManager] Unsupported database backup found "${backup.filename}" - skipping`)
+              await zip.close().catch(() => {})
+              continue
+            }
           } catch (error) {
             Logger.error(`[BackupManager] Failed to unzip backup "${fullFilePath}"`, error)
             if (zip) await zip.close().catch(() => {})
             continue
           }
-
-          const details = data.toString('utf8').split('\n')
-
-          const backup = new Backup({ details, fullPath: fullFilePath })
 
           if (!backup.serverVersion) {
             // Backups before v2
@@ -332,16 +486,21 @@ class BackupManager {
   }
 
   async runBackup() {
+    if (restoreMaintenance.active) {
+      Logger.warn(`[BackupManager] Skipping backup while a postgres restore runs`)
+      return false
+    }
     // Check if Metadata Path is inside Config Path (otherwise there will be an infinite loop as the archiver tries to zip itself)
     Logger.info(`[BackupManager] Running Backup`)
+    // Create the database copy: a sqlite file, or a pg_dump custom-format archive on postgres
+    const isFileDatabase = dialectFor(Database.sequelize).fileBased
     const newBackup = new Backup()
-    newBackup.setData(this.backupPath)
+    newBackup.setData(this.backupPath, isFileDatabase ? 'sqlite' : 'postgres')
 
     await fs.ensureDir(this.AuthorsMetadataPath)
 
-    // Create backup sqlite file
-    const sqliteBackupPath = await this.backupSqliteDb(newBackup).catch((error) => {
-      Logger.error(`[BackupManager] Failed to backup sqlite db`, error)
+    const sqliteBackupPath = await (isFileDatabase ? this.backupSqliteDb(newBackup) : this.backupPostgresDb(newBackup)).catch((error) => {
+      Logger.error(`[BackupManager] Failed to backup ${isFileDatabase ? 'sqlite' : 'postgres'} db`, error)
       const errorMsg = error?.message || error || 'Unknown Error'
       NotificationManager.onBackupFailed(errorMsg)
       return false
@@ -351,8 +510,8 @@ class BackupManager {
       return false
     }
 
-    // Zip sqlite file, /metadata/items, and /metadata/authors folders
-    const zipResult = await this.zipBackup(sqliteBackupPath, newBackup).catch((error) => {
+    // Zip the database copy, /metadata/items, and /metadata/authors folders
+    const zipResult = await this.zipBackup(sqliteBackupPath, newBackup, this.currentBackupEntry).catch((error) => {
       Logger.error(`[BackupManager] Backup Failed ${error}`)
       const errorMsg = error?.message || error || 'Unknown Error'
       NotificationManager.onBackupFailed(errorMsg)
@@ -403,37 +562,112 @@ class BackupManager {
   }
 
   /**
+   * Dumps the Postgres database to a custom-format archive with pg_dump.
+   * @param {Backup} backup
+   * @returns {Promise<string>} path of the dump file
+   */
+  async backupPostgresDb(backup) {
+    const dumpFilePath = Path.join(global.ConfigPath, `absdatabase.${backup.id}.postgres.dump`)
+    await runPostgresTool({ name: 'pg_dump', args: dumpArgs(process.env.DATABASE_URL, dumpFilePath), databaseUrl: process.env.DATABASE_URL })
+    return dumpFilePath
+  }
+
+  /**
+   * Replaces the Postgres database with a custom-format dump, inside one transaction.
+   * @param {string} dumpFilePath
+   */
+  async restorePostgresDb(dumpFilePath) {
+    await runPostgresTool({ name: 'pg_restore', args: restoreArgs(process.env.DATABASE_URL, dumpFilePath), databaseUrl: process.env.DATABASE_URL })
+  }
+
+  /**
    * @see https://github.com/TryGhost/node-sqlite3/pull/1116
    * @param {Backup} backup
    */
   backupSqliteDb(backup) {
-    if (!dialectFor(Database.sequelize).fileBased) {
-      // pg_dump based backups arrive with the native backup change
-      return Promise.reject(new Error(`Backups are not available for the ${Database.dialect} dialect yet`))
-    }
-    const db = new sqlite3.Database(Database.dbPath)
     const dbFilePath = Path.join(global.ConfigPath, `absdatabase.${backup.id}.sqlite`)
-    return new Promise(async (resolve, reject) => {
-      const backup = db.backup(dbFilePath)
-      backup.step(-1)
-      backup.finish()
+    return new Promise((resolve, reject) => {
+      let db
+      let sqliteBackup
+      let pollTimer
+      let settled = false
+      let opened = false
 
-      // Max time ~2 mins
-      for (let i = 0; i < 240; i++) {
-        if (backup.completed) {
-          return resolve(dbFilePath)
-        } else if (backup.failed) {
-          return reject(backup.message || 'Unknown failure reason')
+      const finish = (error, result) => {
+        if (settled) return
+        settled = true
+        clearTimeout(pollTimer)
+
+        const settle = () => {
+          if (error) reject(error)
+          else resolve(result)
         }
-        await new Promise((r) => setTimeout(r, 500))
+
+        // An open that never succeeded has no usable handle, and close never calls back on one.
+        if (!db || !opened) return settle()
+
+        // An opened handle is closed best effort, and the deadline settles the backup if that
+        // close never calls back.
+        let closeSettled = false
+        const closeSettledOnce = () => {
+          if (closeSettled) return
+          closeSettled = true
+          clearTimeout(closeDeadline)
+          settle()
+        }
+        const closeDeadline = setTimeout(closeSettledOnce, SQLITE_CLOSE_DEADLINE_MS)
+        try {
+          db.close(closeSettledOnce)
+        } catch {
+          closeSettledOnce()
+        }
       }
 
-      Logger.error(`[BackupManager] Backup sqlite timed out`)
-      reject('Backup timed out')
+      const pollBackup = async () => {
+        // Max time ~2 mins
+        for (let i = 0; i < 240; i++) {
+          if (settled) return
+          if (sqliteBackup.completed) {
+            return finish(null, dbFilePath)
+          } else if (sqliteBackup.failed) {
+            return finish(sqliteBackup.message || 'Unknown failure reason')
+          }
+          await new Promise((r) => {
+            pollTimer = setTimeout(r, 500)
+          })
+        }
+
+        if (settled) return
+        Logger.error(`[BackupManager] Backup sqlite timed out`)
+        finish('Backup timed out')
+      }
+
+      const startBackup = () => {
+        try {
+          sqliteBackup = db.backup(dbFilePath)
+          // The driver opens the destination itself and reports a failure to open it, or a failed
+          // step, as an 'error' event on the Backup object. Without a listener that event is
+          // uncaught, so it takes the same settle path as every other failure.
+          sqliteBackup.on('error', finish)
+          sqliteBackup.step(-1)
+          sqliteBackup.finish()
+          pollBackup().catch(finish)
+        } catch (error) {
+          finish(error)
+        }
+      }
+
+      // Open with a callback and keep an error listener: a failed open with neither kills the process.
+      db = new sqlite3.Database(Database.dbPath, (error) => {
+        if (error) return finish(error)
+        opened = true
+        startBackup()
+      })
+      db.on('error', finish)
     })
   }
 
-  zipBackup(sqliteBackupPath, backup) {
+  zipBackup(sqliteBackupPath, backup, entryName = 'absdatabase.sqlite') {
     return new Promise((resolve, reject) => {
       // create a file to stream archive data to
       const output = fs.createWriteStream(backup.fullPath)
@@ -497,7 +731,7 @@ class BackupManager {
       // pipe archive data to the file
       archive.pipe(output)
 
-      archive.file(sqliteBackupPath, { name: 'absdatabase.sqlite' })
+      archive.file(sqliteBackupPath, { name: entryName })
       archive.directory(this.ItemsMetadataPath, 'metadata-items')
       archive.directory(this.AuthorsMetadataPath, 'metadata-authors')
 

@@ -1,4 +1,8 @@
+const { randomUUID } = require('crypto')
 const { Sequelize } = require('sequelize')
+
+// Tags this process's Postgres connections so its sessions can be told apart in pg_stat_activity.
+const POSTGRES_APPLICATION_NAME = `audiobookshelf-${randomUUID()}`
 
 /**
  * The only module that knows how SQLite and Postgres differ.
@@ -404,9 +408,20 @@ function resolveDialect(env = process.env) {
 function createSequelize({ dialect, storage, databaseUrl, logging = false, benchmark = false }) {
   if (dialect === 'postgres') {
     if (!databaseUrl) throw new Error('DATABASE_URL is required for the postgres dialect')
-    return new Sequelize(databaseUrl, { dialect: 'postgres', logging, benchmark, quoteIdentifiers: false })
+    return new Sequelize(databaseUrl, {
+      dialect: 'postgres',
+      logging,
+      benchmark,
+      quoteIdentifiers: false,
+      hooks: {
+        // Sequelize copies the URL's query parameters over dialectOptions, so the tag is set on each connection after that.
+        beforeConnect: (config) => {
+          config.dialectOptions = { ...config.dialectOptions, application_name: POSTGRES_APPLICATION_NAME }
+        }
+      }
+    })
   }
   return new Sequelize({ dialect: 'sqlite', storage, logging, benchmark, transactionType: 'IMMEDIATE' })
 }
 
-module.exports = { dialectFor, resolveDialect, createSequelize, SqliteAdapter, PostgresAdapter }
+module.exports = { dialectFor, resolveDialect, createSequelize, SqliteAdapter, PostgresAdapter, POSTGRES_APPLICATION_NAME }
