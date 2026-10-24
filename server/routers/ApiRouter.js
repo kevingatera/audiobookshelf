@@ -533,11 +533,16 @@ class ApiRouter {
    * @param {number} itemsPerPage
    */
   async getUserListeningSessionsPageHelper(userId, page, itemsPerPage) {
-    // Bound the paging values before they reach SQL: a negative LIMIT fails on Postgres.
+    // Bound the paging values before they reach SQL: a negative LIMIT fails on Postgres,
+    // and OFFSET Infinity or an offset past 2^53 is rejected by Postgres too.
     const requestedSize = Math.trunc(Number(itemsPerPage))
     const pageSize = requestedSize >= 1 ? Math.min(requestedSize, 100) : 10
     const requestedPage = Math.trunc(Number(page))
     const pageIndex = requestedPage >= 0 ? requestedPage : 0
+    const offset = pageIndex * pageSize
+    if (!Number.isSafeInteger(requestedPage) || !Number.isSafeInteger(offset)) {
+      throw Object.assign(new Error('Listening session page is out of range'), { status: 400 })
+    }
     const where = { userId }
     const [total, sessions] = await Promise.all([
       Database.countPlaybackSessions(where),

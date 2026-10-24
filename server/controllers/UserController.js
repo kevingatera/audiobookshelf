@@ -449,6 +449,7 @@ class UserController {
       })
       res.json(payload)
     } catch (error) {
+      if (error.status === 400) return res.sendStatus(400)
       Logger.error(`[UserController] Failed to load listening sessions for user ${req.params.id}`, error)
       res.sendStatus(500)
     }

@@ -162,6 +162,7 @@ class MeController {
       const payload = await this.getUserListeningSessionsPageHelper(req.user.id, page, itemsPerPage)
       res.json(payload)
     } catch (error) {
+      if (error.status === 400) return res.sendStatus(400)
       Logger.error(`[MeController] Failed to load listening sessions for user ${req.user.id}`, error)
       res.sendStatus(500)
     }

@@ -364,6 +364,45 @@ describe('Listening stats and listening sessions behavior pin', () => {
     })
   })
 
+  describe('listening session paging bounds', () => {
+    // Non-finite or unsafe page/offset values must be rejected before SQL runs,
+    // because Postgres fails on OFFSET Infinity and on offsets past 2^53.
+    const BAD_PAGES = ['Infinity', '-Infinity', '1e308', '1e15']
+
+    it('rejects bad page values on /api/me/listening-sessions before querying', async () => {
+      const getSessions = sinon.spy(Database, 'getPlaybackSessions')
+      for (const page of BAD_PAGES) {
+        const res = { json: sinon.spy(), sendStatus: sinon.spy() }
+        await MeController.getListeningSessions.call(meCtx, { user: user1, query: { page, itemsPerPage: '100' } }, res)
+        expect(res.sendStatus.calledWith(400), `page=${page}`).to.be.true
+        expect(res.json.called, `page=${page}`).to.be.false
+      }
+      expect(getSessions.called).to.be.false
+    })
+
+    it('rejects bad page values on /api/users/:id/listening-sessions before querying', async () => {
+      const getSessions = sinon.spy(Database, 'getPlaybackSessions')
+      for (const page of BAD_PAGES) {
+        const res = { json: sinon.spy(), sendStatus: sinon.spy() }
+        await UserController.getListeningSessions.call(
+          userCtx,
+          { user: user1, reqUser: user1, params: { id: user2.id }, query: { page } },
+          res
+        )
+        expect(res.sendStatus.calledWith(400), `page=${page}`).to.be.true
+        expect(res.json.called, `page=${page}`).to.be.false
+      }
+      expect(getSessions.called).to.be.false
+    })
+
+    it('still serves a valid page and clamps a negative page to 0', async () => {
+      const payload = await callListeningSessions({ user: user1, query: { page: '-3' } })
+
+      expect(payload.page).to.equal(0)
+      expect(payload.sessions).to.have.length(10)
+    })
+  })
+
   describe('GET /api/users/:id/listening-* (contract)', () => {
     it('returns the target users stats, not the requesting users', async () => {
       const stats = await callUserListeningStats({ user: user1, params: { id: user2.id }, query: {} })
