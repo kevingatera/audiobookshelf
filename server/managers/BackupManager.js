@@ -3,8 +3,9 @@ const Path = require('path')
 const Logger = require('../Logger')
 const SocketAuthority = require('../SocketAuthority')
 const Database = require('../Database')
-const { dialectFor, POSTGRES_APPLICATION_NAME } = require('../utils/dialectAdapter')
+const { dialectFor } = require('../utils/dialectAdapter')
 const { dumpArgs, restoreArgs, runPostgresTool } = require('../utils/postgresTools')
+const restoreMaintenance = require('../utils/restoreMaintenance')
 
 const cron = require('../libs/nodeCron')
 const fs = require('../libs/fsExtra')
@@ -18,6 +19,8 @@ const { getFileSize } = require('../utils/fileUtils')
 const Backup = require('../objects/Backup')
 const CacheManager = require('./CacheManager')
 const NotificationManager = require('./NotificationManager')
+
+const OTHER_CLIENTS_MESSAGE = 'Another client is connected to this database. Stop it, then restore again.'
 
 class BackupManager {
   constructor() {
@@ -299,35 +302,62 @@ class BackupManager {
   }
 
   async requestApplyPostgresBackup(apiCacheManager, backup, zip, entries, res) {
-    // Everything that can fail on the archive is staged before the database is touched. The metadata folders are
-    // moved into place after the restore, so a failure after the restore still leaves a reconnected server.
     const stagingPath = Path.join(global.ConfigPath, 'absdatabase-restore-staging')
     const dumpPath = Path.join(stagingPath, 'absdatabase.postgres.dump')
+    let result
+    try {
+      result = await this.applyPostgresBackup(apiCacheManager, backup, zip, stagingPath, dumpPath)
+    } finally {
+      await zip.close().catch(() => {})
+      await fs.remove(stagingPath).catch((err) => Logger.error(`[BackupManager] Failed to remove restore staging folder`, err))
+    }
+    if (result.status !== 200) return res.status(result.status).send(result.message)
+
+    res.sendStatus(200)
+    SocketAuthority.emitter('backup_applied')
+  }
+
+  /**
+   * Restores the Postgres database from a staged archive. Never throws.
+   *
+   * Order: stage the archive, open the maintenance window (HTTP and sockets get 503), take the exclusive database lock,
+   * disconnect this instance's pool, count other sessions, then pg_restore. The count is the last check before
+   * pg_restore. On every path the pool is reconnected if it was closed, the lock is released and the window closes.
+   * @returns {Promise<{status: number, message?: string}>}
+   */
+  async applyPostgresBackup(apiCacheManager, backup, zip, stagingPath, dumpPath) {
+    if (!restoreMaintenance.begin()) return { status: 409, message: 'A restore is already running on this instance.' }
+
+    const lock = Database.restoreLock
+    let exclusive = false
     let disconnected = false
     try {
-      // The restore replaces the data under other connections, so refuse while any other client is attached.
-      const otherClients = await this.countOtherPostgresClients()
-      if (otherClients > 0) {
-        Logger.warn(`[BackupManager] Refusing postgres restore while ${otherClients} other database connection(s) are open`)
-        return res.status(409).send('Another Audiobookshelf instance is connected to this database. Stop it, then restore again.')
+      try {
+        await this.stagePostgresBackup(zip, stagingPath, dumpPath)
+      } catch (error) {
+        Logger.error(`[BackupManager] Failed to apply postgres backup`, error)
+        return { status: 500, message: `Failed to apply postgres backup: ${error?.message || 'Unknown Error'}` }
       }
 
-      await fs.remove(stagingPath)
-      await fs.ensureDir(stagingPath)
-      const itemsStagingPath = Path.join(stagingPath, 'metadata-items')
-      const authorsStagingPath = Path.join(stagingPath, 'metadata-authors')
-      await fs.ensureDir(itemsStagingPath)
-      await fs.ensureDir(authorsStagingPath)
-      await zip.extract('absdatabase.postgres.dump', dumpPath)
-      await zip.extract('metadata-items/', itemsStagingPath)
-      await zip.extract('metadata-authors/', authorsStagingPath)
-      // node-stream-zip resolves without writing when the entry is missing, so check the file itself.
-      if (!(await fs.pathExists(dumpPath))) throw new Error('Backup archive has no database dump')
+      // Fails while any other running instance holds the shared lock.
+      if (!(await lock.tryExclusive())) {
+        Logger.warn(`[BackupManager] Refusing postgres restore while another instance of this app is running on the database`)
+        return { status: 409, message: OTHER_CLIENTS_MESSAGE }
+      }
+      exclusive = true
 
       await Database.disconnect()
       disconnected = true
-      // The restore runs in one transaction, so a failure rolls back and the original data is still there.
+
+      const others = await lock.countOtherSessions()
+      if (others > 0) {
+        Logger.warn(`[BackupManager] Refusing postgres restore while ${others} other database session(s) are open`)
+        return { status: 409, message: OTHER_CLIENTS_MESSAGE }
+      }
+
+      lock.assertExclusive()
       await this.restorePostgresDb(dumpPath)
+      lock.assertExclusive()
       Logger.info(`[BackupManager] Restored postgres database from backup "${backup.filename}"`)
 
       await this.placeStagedMetadata(stagingPath)
@@ -335,19 +365,33 @@ class BackupManager {
       disconnected = false
       await apiCacheManager.reset()
       await CacheManager.purgeAll()
+      return { status: 200 }
     } catch (error) {
       Logger.error(`[BackupManager] Failed to apply postgres backup`, error)
-      if (disconnected) {
-        await Database.reconnect().catch((reconnectError) => Logger.error(`[BackupManager] Failed to reconnect after a failed postgres restore`, reconnectError))
-      }
-      return res.status(500).send(`Failed to apply postgres backup: ${error?.message || 'Unknown Error'}`)
+      return { status: 500, message: `Failed to apply postgres backup: ${error?.message || 'Unknown Error'}` }
     } finally {
-      await zip.close().catch(() => {})
-      await fs.remove(stagingPath).catch((err) => Logger.error(`[BackupManager] Failed to remove restore staging folder`, err))
+      if (disconnected) await Database.reconnect().catch((err) => Logger.error(`[BackupManager] Failed to reconnect after a failed postgres restore`, err))
+      if (exclusive) await lock.releaseExclusive().catch((err) => Logger.error(`[BackupManager] Failed to release the database restore lock`, err))
+      restoreMaintenance.end()
     }
+  }
 
-    res.sendStatus(200)
-    SocketAuthority.emitter('backup_applied')
+  /**
+   * Extracts the dump and the metadata folders into the staging folder. Fails when the archive has no dump.
+   * Nothing outside the staging folder is touched.
+   */
+  async stagePostgresBackup(zip, stagingPath, dumpPath) {
+    await fs.remove(stagingPath)
+    await fs.ensureDir(stagingPath)
+    const itemsStagingPath = Path.join(stagingPath, 'metadata-items')
+    const authorsStagingPath = Path.join(stagingPath, 'metadata-authors')
+    await fs.ensureDir(itemsStagingPath)
+    await fs.ensureDir(authorsStagingPath)
+    await zip.extract('absdatabase.postgres.dump', dumpPath)
+    await zip.extract('metadata-items/', itemsStagingPath)
+    await zip.extract('metadata-authors/', authorsStagingPath)
+    // node-stream-zip resolves without writing when the entry is missing, so check the file itself.
+    if (!(await fs.pathExists(dumpPath))) throw new Error('Backup archive has no database dump')
   }
 
   /**
@@ -431,6 +475,10 @@ class BackupManager {
   }
 
   async runBackup() {
+    if (restoreMaintenance.active) {
+      Logger.warn(`[BackupManager] Skipping backup while a postgres restore runs`)
+      return false
+    }
     // Check if Metadata Path is inside Config Path (otherwise there will be an infinite loop as the archiver tries to zip itself)
     Logger.info(`[BackupManager] Running Backup`)
     const newBackup = new Backup()
@@ -511,20 +559,6 @@ class BackupManager {
     const dumpFilePath = Path.join(global.ConfigPath, `absdatabase.${backup.id}.postgres.dump`)
     await runPostgresTool({ name: 'pg_dump', args: dumpArgs(process.env.DATABASE_URL, dumpFilePath), databaseUrl: process.env.DATABASE_URL })
     return dumpFilePath
-  }
-
-  /**
-   * Counts client connections to this database that were not opened by this process.
-   * @returns {Promise<number>}
-   */
-  async countOtherPostgresClients() {
-    const [row] = await Database.sequelize.query(
-      `SELECT count(*) AS count FROM pg_stat_activity
-       WHERE datname = current_database() AND backend_type = 'client backend' AND pid <> pg_backend_pid()
-         AND application_name IS DISTINCT FROM :ownName`,
-      { replacements: { ownName: POSTGRES_APPLICATION_NAME }, type: 'SELECT' }
-    )
-    return Number(row.count)
   }
 
   /**
