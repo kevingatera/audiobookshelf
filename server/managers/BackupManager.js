@@ -577,25 +577,59 @@ class BackupManager {
    * @param {Backup} backup
    */
   backupSqliteDb(backup) {
-    const db = new sqlite3.Database(Database.dbPath)
     const dbFilePath = Path.join(global.ConfigPath, `absdatabase.${backup.id}.sqlite`)
-    return new Promise(async (resolve, reject) => {
-      const backup = db.backup(dbFilePath)
-      backup.step(-1)
-      backup.finish()
+    return new Promise((resolve, reject) => {
+      let db
+      let sqliteBackup
+      let settled = false
 
-      // Max time ~2 mins
-      for (let i = 0; i < 240; i++) {
-        if (backup.completed) {
-          return resolve(dbFilePath)
-        } else if (backup.failed) {
-          return reject(backup.message || 'Unknown failure reason')
+      const finish = (error, result) => {
+        if (settled) return
+        settled = true
+        if (db) {
+          db.close(() => {
+            if (error) reject(error)
+            else resolve(result)
+          })
+        } else if (error) {
+          reject(error)
+        } else {
+          resolve(result)
         }
-        await new Promise((r) => setTimeout(r, 500))
       }
 
-      Logger.error(`[BackupManager] Backup sqlite timed out`)
-      reject('Backup timed out')
+      const pollBackup = async () => {
+        // Max time ~2 mins
+        for (let i = 0; i < 240; i++) {
+          if (sqliteBackup.completed) {
+            return finish(null, dbFilePath)
+          } else if (sqliteBackup.failed) {
+            return finish(sqliteBackup.message || 'Unknown failure reason')
+          }
+          await new Promise((r) => setTimeout(r, 500))
+        }
+
+        Logger.error(`[BackupManager] Backup sqlite timed out`)
+        finish('Backup timed out')
+      }
+
+      const startBackup = () => {
+        try {
+          sqliteBackup = db.backup(dbFilePath)
+          sqliteBackup.step(-1)
+          sqliteBackup.finish()
+          pollBackup().catch(finish)
+        } catch (error) {
+          finish(error)
+        }
+      }
+
+      // Open with a callback and keep an error listener: a failed open with neither kills the process.
+      db = new sqlite3.Database(Database.dbPath, (error) => {
+        if (error) return finish(error)
+        startBackup()
+      })
+      db.on('error', finish)
     })
   }
 
