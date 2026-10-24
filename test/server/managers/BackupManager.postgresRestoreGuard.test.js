@@ -251,7 +251,10 @@ describe('BackupManager postgres restore guards', function () {
     let firstDone
     try {
       firstDone = manager.requestApplyPostgresBackup({ reset: async () => {} }, { filename: 'first' }, first.zip, first.entries, firstRes)
-      await inRestore
+      // If the first request ends before pg_restore, fail with its status instead of waiting on the gate.
+      const ended = firstDone.then(() => { throw new Error(`first request ended before pg_restore with ${firstRes.code}`) })
+      ended.catch(() => {})
+      await Promise.race([inRestore, ended])
       await manager.requestApplyPostgresBackup({ reset: async () => {} }, { filename: 'second' }, second.zip, second.entries, secondRes)
       release()
       await firstDone
