@@ -137,6 +137,18 @@ class SqliteAdapter {
   }
 
   /**
+   * Text value at a JSON path on a column qualified by a table alias.
+   * Use when a join also has a column with the same name, e.g. user and mediaProgress both have extraData.
+   * @param {string} alias table alias as Sequelize emits it
+   * @param {string} column
+   * @param {string|string[]} path
+   */
+  jsonPathTextAt(alias, column, path) {
+    if (!SIMPLE_IDENTIFIER.test(column)) throw new Error(`Invalid column for a JSON path: ${column}`)
+    return this.jsonPathText(this.column(alias, column), path)
+  }
+
+  /**
    * Numeric value at a JSON path.
    * @param {string} column
    * @param {string|string[]} path
@@ -291,6 +303,19 @@ class PostgresAdapter {
 
   jsonPathText(column, path) {
     return `(${column}::jsonb #>> '{${[].concat(path).join(',')}}')`
+  }
+
+  /**
+   * Text value at a JSON path on a column qualified by a table alias.
+   * The alias is always quoted because Sequelize aliases are quoted and `user` is a reserved word.
+   * The column stays unquoted so it folds to the lower-case physical name this fork's schema uses.
+   * @param {string} alias table alias as Sequelize emits it
+   * @param {string} column
+   * @param {string|string[]} path
+   */
+  jsonPathTextAt(alias, column, path) {
+    if (!SIMPLE_IDENTIFIER.test(column)) throw new Error(`Invalid column for a JSON path: ${column}`)
+    return this.jsonPathText(`"${String(alias).replace(/"/g, '""')}".${column}`, path)
   }
 
   jsonPathNumber(column, path) {
