@@ -47,8 +47,9 @@ async function installTrigger(sequelize, logger, { name, table, event, functionN
   await sequelize.query(expected)
 }
 
+// Ties on createdat are broken by the link id, so every query plan returns the same author order.
 const authorNamesSql = (bookIdExpr) => `
-  SELECT string_agg(a.name, ', ' ORDER BY ba.createdat ASC) AS firstlast, string_agg(a.lastfirst, ', ' ORDER BY ba.createdat ASC) AS lastfirst
+  SELECT string_agg(a.name, ', ' ORDER BY ba.createdat ASC, ba.id ASC) AS firstlast, string_agg(a.lastfirst, ', ' ORDER BY ba.createdat ASC, ba.id ASC) AS lastfirst
   FROM bookauthors ba JOIN authors a ON a.id = ba.authorid WHERE ba.bookid = ${bookIdExpr}`
 
 // Recomputes the author names of one book. With no authors left the aggregate yields NULLs.
@@ -112,7 +113,7 @@ module.exports = {
     // Backfill author names for every book: recompute, and clear rows whose book has no authors.
     await sequelize.query(`
       UPDATE libraryitems li SET authornamesfirstlast = s.firstlast, authornameslastfirst = s.lastfirst
-      FROM (SELECT ba.bookid, string_agg(a.name, ', ' ORDER BY ba.createdat ASC) AS firstlast, string_agg(a.lastfirst, ', ' ORDER BY ba.createdat ASC) AS lastfirst
+      FROM (SELECT ba.bookid, string_agg(a.name, ', ' ORDER BY ba.createdat ASC, ba.id ASC) AS firstlast, string_agg(a.lastfirst, ', ' ORDER BY ba.createdat ASC, ba.id ASC) AS lastfirst
             FROM bookauthors ba JOIN authors a ON a.id = ba.authorid GROUP BY ba.bookid) s
       WHERE li.mediatype = 'book' AND li.mediaid = s.bookid
         AND (li.authornamesfirstlast IS DISTINCT FROM s.firstlast OR li.authornameslastfirst IS DISTINCT FROM s.lastfirst)`)
