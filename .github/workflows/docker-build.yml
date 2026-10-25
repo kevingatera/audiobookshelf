@@ -10,7 +10,7 @@ on:
         required: true
         default: 'latest'
   push:
-    branches: [main, master]
+    branches: [main, master, homelab-postgres]
     tags:
       - 'v*.*.*'
     # Only build when files in these directories have been changed
@@ -19,8 +19,10 @@ on:
       - server/**
       - index.js
       - package.json
+      - package-lock.json
       - tsconfig.server.json
       - Dockerfile
+      - .github/workflows/docker-build.yml
 
 # github.token pushes to GHCR. The package permission is required for that.
 permissions:
@@ -57,6 +59,8 @@ jobs:
           tags: |
             type=edge,branch=master
             type=semver,pattern={{version}}
+            type=raw,value=homelab-postgres,enable=${{ github.ref == 'refs/heads/homelab-postgres' }}
+            type=raw,value=homelab-postgres-${{ github.sha }},enable=${{ github.ref == 'refs/heads/homelab-postgres' }}
 
       - name: Setup QEMU
         uses: docker/setup-qemu-action@v3
