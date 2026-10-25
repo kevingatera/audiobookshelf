@@ -22,6 +22,8 @@ const CacheManager = require('./CacheManager')
 const NotificationManager = require('./NotificationManager')
 
 const OTHER_CLIENTS_MESSAGE = 'Another client is connected to this database. Stop it, then restore again.'
+// A close on a wedged sqlite handle never calls back, so the backup settles after this grace period.
+const SQLITE_CLOSE_DEADLINE_MS = 5000
 
 class BackupManager {
   constructor() {
@@ -423,7 +425,7 @@ class BackupManager {
           const fullFilePath = Path.join(this.backupPath, filename)
 
           let zip = null
-          let data = null
+          let backup = null
           try {
             zip = new StreamZip.async({ file: fullFilePath })
             const entries = await zip.entries()
@@ -440,16 +442,22 @@ class BackupManager {
               continue
             }
 
-            data = await zip.entryData('details')
+            const data = await zip.entryData('details')
+            const details = data.toString('utf8').split('\n')
+
+            backup = new Backup({ details, fullPath: fullFilePath })
+
+            // An archive without a database entry cannot be applied, so it is not listed.
+            if (!BackupManager.backupDialectOf(entries)) {
+              Logger.error(`[BackupManager] Unsupported database backup found "${backup.filename}" - skipping`)
+              await zip.close().catch(() => {})
+              continue
+            }
           } catch (error) {
             Logger.error(`[BackupManager] Failed to unzip backup "${fullFilePath}"`, error)
             if (zip) await zip.close().catch(() => {})
             continue
           }
-
-          const details = data.toString('utf8').split('\n')
-
-          const backup = new Backup({ details, fullPath: fullFilePath })
 
           if (!backup.serverVersion) {
             // Backups before v2
@@ -484,13 +492,13 @@ class BackupManager {
     }
     // Check if Metadata Path is inside Config Path (otherwise there will be an infinite loop as the archiver tries to zip itself)
     Logger.info(`[BackupManager] Running Backup`)
+    // Create the database copy: a sqlite file, or a pg_dump custom-format archive on postgres
+    const isFileDatabase = dialectFor(Database.sequelize).fileBased
     const newBackup = new Backup()
-    newBackup.setData(this.backupPath)
+    newBackup.setData(this.backupPath, isFileDatabase ? 'sqlite' : 'postgres')
 
     await fs.ensureDir(this.AuthorsMetadataPath)
 
-    // Create the database copy: a sqlite file, or a pg_dump custom-format archive on postgres
-    const isFileDatabase = dialectFor(Database.sequelize).fileBased
     const sqliteBackupPath = await (isFileDatabase ? this.backupSqliteDb(newBackup) : this.backupPostgresDb(newBackup)).catch((error) => {
       Logger.error(`[BackupManager] Failed to backup ${isFileDatabase ? 'sqlite' : 'postgres'} db`, error)
       const errorMsg = error?.message || error || 'Unknown Error'
@@ -577,25 +585,85 @@ class BackupManager {
    * @param {Backup} backup
    */
   backupSqliteDb(backup) {
-    const db = new sqlite3.Database(Database.dbPath)
     const dbFilePath = Path.join(global.ConfigPath, `absdatabase.${backup.id}.sqlite`)
-    return new Promise(async (resolve, reject) => {
-      const backup = db.backup(dbFilePath)
-      backup.step(-1)
-      backup.finish()
+    return new Promise((resolve, reject) => {
+      let db
+      let sqliteBackup
+      let pollTimer
+      let settled = false
+      let opened = false
 
-      // Max time ~2 mins
-      for (let i = 0; i < 240; i++) {
-        if (backup.completed) {
-          return resolve(dbFilePath)
-        } else if (backup.failed) {
-          return reject(backup.message || 'Unknown failure reason')
+      const finish = (error, result) => {
+        if (settled) return
+        settled = true
+        clearTimeout(pollTimer)
+
+        const settle = () => {
+          if (error) reject(error)
+          else resolve(result)
         }
-        await new Promise((r) => setTimeout(r, 500))
+
+        // An open that never succeeded has no usable handle, and close never calls back on one.
+        if (!db || !opened) return settle()
+
+        // An opened handle is closed best effort, and the deadline settles the backup if that
+        // close never calls back.
+        let closeSettled = false
+        const closeSettledOnce = () => {
+          if (closeSettled) return
+          closeSettled = true
+          clearTimeout(closeDeadline)
+          settle()
+        }
+        const closeDeadline = setTimeout(closeSettledOnce, SQLITE_CLOSE_DEADLINE_MS)
+        try {
+          db.close(closeSettledOnce)
+        } catch {
+          closeSettledOnce()
+        }
       }
 
-      Logger.error(`[BackupManager] Backup sqlite timed out`)
-      reject('Backup timed out')
+      const pollBackup = async () => {
+        // Max time ~2 mins
+        for (let i = 0; i < 240; i++) {
+          if (settled) return
+          if (sqliteBackup.completed) {
+            return finish(null, dbFilePath)
+          } else if (sqliteBackup.failed) {
+            return finish(sqliteBackup.message || 'Unknown failure reason')
+          }
+          await new Promise((r) => {
+            pollTimer = setTimeout(r, 500)
+          })
+        }
+
+        if (settled) return
+        Logger.error(`[BackupManager] Backup sqlite timed out`)
+        finish('Backup timed out')
+      }
+
+      const startBackup = () => {
+        try {
+          sqliteBackup = db.backup(dbFilePath)
+          // The driver opens the destination itself and reports a failure to open it, or a failed
+          // step, as an 'error' event on the Backup object. Without a listener that event is
+          // uncaught, so it takes the same settle path as every other failure.
+          sqliteBackup.on('error', finish)
+          sqliteBackup.step(-1)
+          sqliteBackup.finish()
+          pollBackup().catch(finish)
+        } catch (error) {
+          finish(error)
+        }
+      }
+
+      // Open with a callback and keep an error listener: a failed open with neither kills the process.
+      db = new sqlite3.Database(Database.dbPath, (error) => {
+        if (error) return finish(error)
+        opened = true
+        startBackup()
+      })
+      db.on('error', finish)
     })
   }
 

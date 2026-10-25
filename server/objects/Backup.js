@@ -62,9 +62,13 @@ class Backup {
     }
   }
 
-  setData(backupDirPath) {
+  /**
+   * @param {string} backupDirPath
+   * @param {string} dialect database the backup was made from, 'sqlite' or 'postgres'
+   */
+  setData(backupDirPath, dialect) {
     this.id = date.format(new Date(), 'YYYY-MM-DD[T]HHmm')
-    this.key = 'sqlite'
+    this.key = dialect
     this.datePretty = date.format(new Date(), 'ddd, MMM D YYYY HH:mm')
 
     this.backupDirPath = backupDirPath
