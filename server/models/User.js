@@ -4,7 +4,7 @@ const { LRUCache } = require('lru-cache')
 
 const Logger = require('../Logger')
 const SocketAuthority = require('../SocketAuthority')
-const { isNullOrNaN } = require('../utils')
+const { isNullOrNaN, isUUID } = require('../utils')
 const { dialectFor } = require('../utils/dialectAdapter')
 const TokenManager = require('../auth/TokenManager')
 
@@ -423,12 +423,22 @@ class User extends Model {
     const cachedUser = userCache.getById(userId) || userCache.getByOldId(userId)
     if (cachedUser) return cachedUser
 
-    const user = await this.findOne({
-      where: {
-        [sequelize.Op.or]: [{ id: userId }, { 'extraData.oldUserId': userId }]
-      },
-      include: this.sequelize.models.mediaProgress
-    })
+    let user = null
+    // Postgres rejects a non-UUID value compared with the uuid id column (22P02), so only use the primary
+    // key when the value is UUID-shaped. Legacy ids then fall through to the extraData lookup below.
+    if (isUUID(userId)) {
+      user = await this.findByPk(userId, {
+        include: this.sequelize.models.mediaProgress
+      })
+    }
+
+    if (!user) {
+      // Qualify the JSON column: mediaProgress also has extraData, and the Postgres schema stores it lower-case.
+      user = await this.findOne({
+        where: sequelize.where(sequelize.literal(dialectFor(this.sequelize).jsonPathTextAt(this.name, 'extraData', 'oldUserId')), userId),
+        include: this.sequelize.models.mediaProgress
+      })
+    }
 
     if (user) userCache.set(user)
 
